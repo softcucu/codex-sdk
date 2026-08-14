@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import queue
+import re
+import time
 from dataclasses import dataclass
 from typing import Any, Callable, Iterator, Protocol
 
 from openai_codex import Codex, CodexConfig
-from openai_codex._goal import _GoalNotificationStream
+from openai_codex._goal import _GoalNotificationStream, _GoalStreamClosed
 from openai_codex.generated.v2_all import (
     IdleThreadStatus,
     ThreadGoalGetResponse,
@@ -14,6 +17,16 @@ from openai_codex.generated.v2_all import (
 from pydantic import BaseModel
 
 from .errors import IncompatibleCodexSdkError, NoActiveGoalError
+
+
+_RETRYABLE_HTTP_STATUSES = {408, 409, 425, 429, 500, 502, 503, 504}
+_RETRYABLE_ERROR_TEXT = re.compile(
+    r"(?:\b(?:408|409|425|429|500|502|503|504)\b|"
+    r"(?:rate|usage)[ -]?limit|server.?overload|temporar(?:y|ily) unavailable|"
+    r"response stream (?:disconnected|connection failed)|connection (?:reset|closed|failed)|"
+    r"too many failed attempts|retry limit|timed? ?out)",
+    re.IGNORECASE,
+)
 
 
 @dataclass(slots=True)
@@ -64,6 +77,120 @@ class _ThreadSettingsUpdateResponse(BaseModel):
     pass
 
 
+@dataclass(slots=True)
+class _GoalNotificationWatchdog:
+    """Release a Goal stream when a failed physical turn stops producing events.
+
+    The SDK's logical Goal stream waits for both ``turn/completed`` and a
+    terminal ``thread/goal/updated`` notification. A runtime can persist the
+    terminal Goal state without delivering (or successfully decoding) that
+    notification, especially after its internal retries end in HTTP 429. In
+    that case the SDK blocks forever and the controller never gets a chance to
+    issue ``/goal resume``.
+
+    Polling starts only after a retryable error or a failed turn has been seen,
+    so a legitimately long-running tool call is not subject to this timeout.
+    """
+
+    client: Any
+    state: Any
+    thread_id: str
+    poll_interval_seconds: float
+    stall_timeout_seconds: float
+    clock: Callable[[], float] = time.monotonic
+    _retryable_error_seen: bool = False
+    _failed_completion_seen: bool = False
+    _runtime_will_retry: bool | None = None
+    _last_activity_at: float = 0.0
+
+    def __post_init__(self) -> None:
+        self._last_activity_at = self.clock()
+
+    def __call__(self) -> Any:
+        notifications = getattr(self.state, "_notifications", None)
+        if notifications is None:
+            # Compatibility fallback for a future SDK implementation. The
+            # project pins the SDK minor version, whose state uses this queue.
+            return self.client.next_goal_notification(self.state)
+
+        while True:
+            try:
+                item = notifications.get(timeout=self.poll_interval_seconds)
+            except queue.Empty:
+                self._check_failed_stream()
+                continue
+
+            if isinstance(item, BaseException):
+                raise item
+            self._last_activity_at = self.clock()
+            self._observe(item)
+            return item
+
+    def _observe(self, notification: Any) -> None:
+        method = str(getattr(notification, "method", ""))
+        payload = _model_data(getattr(notification, "payload", notification))
+
+        if method == "error" and _contains_retryable_signal(payload):
+            self._retryable_error_seen = True
+            if isinstance(payload, dict):
+                will_retry = payload.get("willRetry", payload.get("will_retry"))
+                if isinstance(will_retry, bool):
+                    self._runtime_will_retry = will_retry
+            return
+
+        if method == "turn/started":
+            self._clear_failure_signal()
+            return
+
+        if method != "turn/completed" or not isinstance(payload, dict):
+            return
+        turn = payload.get("turn")
+        status = turn.get("status") if isinstance(turn, dict) else None
+        if _enum_value(status) == "failed":
+            self._failed_completion_seen = True
+        elif status is not None:
+            self._clear_failure_signal()
+
+    def _clear_failure_signal(self) -> None:
+        self._retryable_error_seen = False
+        self._failed_completion_seen = False
+        self._runtime_will_retry = None
+
+    def _check_failed_stream(self) -> None:
+        if not self._failure_suspected():
+            return
+
+        response = self.client.request(
+            "thread/goal/get",
+            {"threadId": self.thread_id},
+            response_model=ThreadGoalGetResponse,
+        )
+        goal = response.goal
+        status = None if goal is None else _enum_value(goal.status)
+        if goal is None or status != ThreadGoalStatus.active.value:
+            # End the SDK iterator normally. The controller immediately reads
+            # the persisted Goal and either returns it or resumes it.
+            raise _GoalStreamClosed()
+
+        timeout = 0.0 if self._runtime_will_retry is False else self.stall_timeout_seconds
+        stalled_for = self.clock() - self._last_activity_at
+        if stalled_for >= timeout:
+            raise TimeoutError(
+                "timed out after "
+                f"{stalled_for:.1f}s waiting for an active Goal stream to recover "
+                "from a transient error or failed turn"
+            )
+
+    def _failure_suspected(self) -> bool:
+        if self._retryable_error_seen or self._failed_completion_seen:
+            return True
+        completed = getattr(self.state, "completed_turn", None)
+        current_turn = getattr(self.state, "current_turn", None)
+        active_turn_id = current_turn() if callable(current_turn) else None
+        status = None if completed is None else _enum_value(getattr(completed, "status", None))
+        return active_turn_id is None and status == "failed"
+
+
 class OfficialBackend:
     """Small compatibility layer over the official ``openai-codex`` SDK.
 
@@ -73,6 +200,8 @@ class OfficialBackend:
     """
 
     _GOAL_START_TIMEOUT_SECONDS = 30.0
+    _GOAL_STREAM_POLL_SECONDS = 1.0
+    _GOAL_STREAM_STALL_TIMEOUT_SECONDS = 30.0
 
     def __init__(self, config: CodexConfig | None = None) -> None:
         self._config = config or CodexConfig()
@@ -250,11 +379,18 @@ class OfficialBackend:
             response_model=_ThreadSettingsUpdateResponse,
         )
 
-    @staticmethod
-    def _goal_operation(client: Any, state: Any, logical_turn_id: str) -> Operation:
+    @classmethod
+    def _goal_operation(cls, client: Any, state: Any, logical_turn_id: str) -> Operation:
+        watchdog = _GoalNotificationWatchdog(
+            client=client,
+            state=state,
+            thread_id=state.thread_id,
+            poll_interval_seconds=cls._GOAL_STREAM_POLL_SECONDS,
+            stall_timeout_seconds=cls._GOAL_STREAM_STALL_TIMEOUT_SECONDS,
+        )
         stream = _GoalNotificationStream(
             state=state,
-            next_notification=lambda: client.next_goal_notification(state),
+            next_notification=watchdog,
             unregister=lambda: client.unregister_goal_operation(state),
             cancel_goal=lambda: client.cancel_goal_operation(state),
         )
@@ -263,3 +399,33 @@ class OfficialBackend:
             events=stream,
             cancel_callback=lambda: client.cancel_goal_operation(state),
         )
+
+
+def _enum_value(value: Any) -> Any:
+    return getattr(value, "value", value)
+
+
+def _model_data(value: Any) -> Any:
+    if hasattr(value, "model_dump"):
+        return value.model_dump(by_alias=True, mode="json")
+    if isinstance(value, dict):
+        return {str(key): _model_data(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_model_data(item) for item in value]
+    return _enum_value(value)
+
+
+def _contains_retryable_signal(value: Any) -> bool:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            normalized_key = key.replace("_", "").lower()
+            if normalized_key == "httpstatuscode" and item in _RETRYABLE_HTTP_STATUSES:
+                return True
+            if _contains_retryable_signal(item):
+                return True
+        return False
+    if isinstance(value, list):
+        return any(_contains_retryable_signal(item) for item in value)
+    if isinstance(value, str):
+        return bool(_RETRYABLE_ERROR_TEXT.search(value))
+    return False
