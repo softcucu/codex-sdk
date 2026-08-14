@@ -149,6 +149,64 @@ def test_human_renderer_shows_codex_style_activity() -> None:
     assert "exit 0" in output.getvalue()
 
 
+def test_human_renderer_aligns_codex_message_and_plan() -> None:
+    output = io.StringIO()
+    renderer = EventRenderer("human", output)
+    renderer.notification(
+        Notification(
+            "item/agentMessage/delta",
+            {"itemId": "message-1", "delta": "I will inspect\nthe renderer."},
+        )
+    )
+    renderer.notification(
+        Notification(
+            "turn/plan/updated",
+            {
+                "plan": [
+                    {"status": "completed", "step": "Find the renderer"},
+                    {"status": "inProgress", "step": "Improve the layout"},
+                    {"status": "pending", "step": "Run tests"},
+                ]
+            },
+        )
+    )
+    renderer.close()
+
+    assert output.getvalue() == (
+        "◆ Codex  I will inspect\n"
+        "         the renderer.\n"
+        "◇ Plan   ✓ Find the renderer\n"
+        "         → Improve the layout\n"
+        "         ○ Run tests\n"
+    )
+
+
+def test_human_renderer_ignores_empty_agent_delta() -> None:
+    output = io.StringIO()
+    renderer = EventRenderer("human", output)
+    renderer.notification(
+        Notification(
+            "item/agentMessage/delta",
+            {"itemId": "message-1", "delta": ""},
+        )
+    )
+    renderer.notification(
+        Notification(
+            "item/completed",
+            {
+                "item": {
+                    "id": "message-1",
+                    "type": "agentMessage",
+                    "text": "Done",
+                }
+            },
+        )
+    )
+    renderer.close()
+
+    assert output.getvalue() == "◆ Codex  Done\n"
+
+
 def test_debug_renderer_preserves_unknown_payload() -> None:
     output = io.StringIO()
     renderer = EventRenderer("debug", output)

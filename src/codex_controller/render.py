@@ -25,6 +25,8 @@ class EventRenderer:
         self._lock = threading.Lock()
         self._sequence = 0
         self._open_channel: tuple[str, str] | None = None
+        self._open_channel_continuation = ""
+        self._open_channel_at_line_start = False
         self._seen_agent_deltas: set[str] = set()
         self._context = dict(context or {})
 
@@ -107,13 +109,19 @@ class EventRenderer:
 
         if method == "item/agentMessage/delta":
             item_id = str(payload.get("itemId", ""))
-            self._stream_delta("agent", item_id, str(payload.get("delta", "")), "codex\n")
-            self._seen_agent_deltas.add(item_id)
+            delta = str(payload.get("delta", ""))
+            if delta:
+                self._stream_delta("agent", item_id, delta, "◆ Codex  ", "         ")
+                self._seen_agent_deltas.add(item_id)
             return
 
         if method == "item/reasoning/summaryTextDelta":
             item_id = str(payload.get("itemId", ""))
-            self._stream_delta("reasoning", item_id, str(payload.get("delta", "")), "• ")
+            delta = str(payload.get("delta", ""))
+            if delta:
+                self._stream_delta(
+                    "reasoning", item_id, delta, "◇ Think  ", "         "
+                )
             return
 
         if method in {"item/started", "item/completed"}:
@@ -127,12 +135,18 @@ class EventRenderer:
             self._finish_open_channel()
             plan = payload.get("plan")
             if isinstance(plan, list):
-                self._line("plan")
-                for step in plan:
-                    if isinstance(step, dict):
-                        status = str(step.get("status", "pending"))
-                        marker = "✓" if status == "completed" else "→" if status == "inProgress" else "·"
-                        self._line(f"  {marker} {step.get('step', '')}")
+                steps = [step for step in plan if isinstance(step, dict)]
+                for index, step in enumerate(steps):
+                    status = str(step.get("status", "pending"))
+                    marker = (
+                        "✓"
+                        if status == "completed"
+                        else "→"
+                        if status == "inProgress"
+                        else "○"
+                    )
+                    prefix = "◇ Plan   " if index == 0 else "         "
+                    self._line(f"{prefix}{marker} {step.get('step', '')}")
             return
 
         if method == "error":
@@ -185,27 +199,53 @@ class EventRenderer:
         if item_type == "agentMessage" and not started:
             item_id = str(item.get("id", ""))
             if item_id not in self._seen_agent_deltas and item.get("text"):
-                self._line("codex")
-                self._line(str(item["text"]))
+                self._labeled_text("◆ Codex  ", "         ", str(item["text"]))
             return
 
         if item_type == "subAgentActivity" and started:
             self._line(f"• Subagent {item.get('kind', '')}: {item.get('agentPath', '')}")
 
-    def _stream_delta(self, kind: str, item_id: str, delta: str, prefix: str) -> None:
+    def _stream_delta(
+        self,
+        kind: str,
+        item_id: str,
+        delta: str,
+        prefix: str,
+        continuation: str,
+    ) -> None:
         channel = (kind, item_id)
         if self._open_channel != channel:
             self._finish_open_channel()
             self.output.write(prefix)
             self._open_channel = channel
-        self.output.write(delta)
+            self._open_channel_continuation = continuation
+            self._open_channel_at_line_start = False
+
+        segments = delta.split("\n")
+        for index, segment in enumerate(segments):
+            if self._open_channel_at_line_start and segment:
+                self.output.write(self._open_channel_continuation)
+                self._open_channel_at_line_start = False
+            self.output.write(segment)
+            if index < len(segments) - 1:
+                self.output.write("\n")
+                self._open_channel_at_line_start = True
         self.output.flush()
 
     def _finish_open_channel(self) -> None:
         if self._open_channel is not None:
-            self.output.write("\n")
+            if not self._open_channel_at_line_start:
+                self.output.write("\n")
             self.output.flush()
             self._open_channel = None
+            self._open_channel_continuation = ""
+            self._open_channel_at_line_start = False
+
+    def _labeled_text(self, prefix: str, continuation: str, text: str) -> None:
+        lines = text.splitlines() or [""]
+        self._line(prefix + lines[0])
+        for line in lines[1:]:
+            self._line(continuation + line)
 
     def _line(self, text: str) -> None:
         self.output.write(text + "\n")

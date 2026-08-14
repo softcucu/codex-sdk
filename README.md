@@ -178,6 +178,10 @@ with CodexController(cwd=".") as codex:
 ```text
 codex  thread 019c...
 goal   完成迁移并让测试通过
+◆ Codex  我先检查失败原因，再按结果调整实现。
+◇ Plan   ✓ 定位失败用例
+         → 修复实现
+         ○ 运行完整测试
 • Run pytest -q
   └ exit 1 · 3.2s
 ↻      Codex usage/rate limit stopped the Goal; resuming in 5.0s
