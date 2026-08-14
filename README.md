@@ -19,7 +19,7 @@ python3.11 -m venv .venv
 .venv/bin/pip install -e .
 ```
 
-官方 SDK 会安装与其版本匹配的 Codex runtime，并复用现有 Codex 登录状态。也可以通过 `codex_bin=` 指定本机 Codex 可执行文件。
+官方 SDK 会安装与其版本匹配的 Codex runtime，并复用现有 Codex 登录状态。本项目默认优先使用 `PATH` 中的 `codex`，确保 Python app-server 与命令行使用同一个 runtime；如果 `PATH` 中找不到，才回退到 SDK 绑定的 runtime。也可以通过 `codex_bin=` 显式指定可执行文件，显式值始终优先。
 
 ## 最简用法
 
@@ -365,7 +365,7 @@ codex-goal --help
 | `--max-delay SECONDS` | Goal 单次自动恢复等待时间的上限，必须大于等于 `0`，默认 `300` 秒。 |
 | `--output-mode {quiet,human,debug}` | 输出模式：`quiet` 不打印事件，`human` 输出适合阅读的流式活动，`debug` 输出完整 JSONL 事件。默认是 `human`。 |
 | `--thread-id ID` | 恢复指定的已有 Codex thread 及其上下文，再执行本次 `run` 或启动一个新 Goal；不传时创建新 thread。它不会调用 `resume_goal()`，因此 `--task-type goal` 会用本次 objective 替换该 thread 上原有的 Goal。 |
-| `--codex-bin PATH` | 使用指定的 Codex 可执行文件；不传时使用 `openai-codex` SDK 自带或自动解析的 runtime。 |
+| `--codex-bin PATH` | 使用指定的 Codex 可执行文件；不传时优先使用 `PATH` 中的 `codex`，找不到时回退到 `openai-codex` SDK 绑定的 runtime。 |
 
 `main.py` 对新建和恢复的 thread 都固定使用 `Sandbox.workspace_write` 和
 `ApprovalMode.deny_all`：Codex 可以修改项目工作区和沙箱默认临时目录，但所有需要扩大

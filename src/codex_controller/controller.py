@@ -4,13 +4,13 @@ import random
 import re
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable
 
 from openai_codex import CodexConfig, TransportClosedError, is_retryable_error
 
 from ._backend import Backend, OfficialBackend, Operation
-from .config import ControllerConfig, OutputMode, ResumePolicy
+from .config import ControllerConfig, OutputMode, ResumePolicy, resolve_codex_bin
 from .errors import GoalResumeExhaustedError, NoActiveGoalError
 from .models import GoalResult, GoalState, RunResult, model_to_data, normalize_goal
 from .render import EventRenderer
@@ -73,7 +73,11 @@ class CodexController:
             output=output,
             resume_policy=resume_policy,
         )
-        sdk_config = codex_config or CodexConfig(cwd=cwd, codex_bin=codex_bin)
+        if codex_config is None:
+            sdk_config = CodexConfig(cwd=cwd, codex_bin=public_config.codex_bin)
+        else:
+            resolved_bin = resolve_codex_bin(codex_config.codex_bin)
+            sdk_config = replace(codex_config, codex_bin=resolved_bin)
         self._backend = _backend or OfficialBackend(sdk_config)
         self._renderer = EventRenderer(
             public_config.output_mode,

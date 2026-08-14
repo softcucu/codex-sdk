@@ -2,7 +2,7 @@
 
 from openai_codex import ApprovalMode, CodexConfig, Sandbox
 
-from .config import ControllerConfig, OutputMode, ResumePolicy
+from .config import ControllerConfig, OutputMode, ResumePolicy, resolve_codex_bin
 from .controller import CodexController
 from .errors import (
     CodexControllerError,
@@ -21,6 +21,7 @@ __all__ = [
     "ControllerConfig",
     "OutputMode",
     "ResumePolicy",
+    "resolve_codex_bin",
     "GoalState",
     "GoalResult",
     "RunResult",
@@ -33,4 +34,4 @@ __all__ = [
     "NoActiveGoalError",
 ]
 
-__version__ = "0.2.2"
+__version__ = "0.2.3"

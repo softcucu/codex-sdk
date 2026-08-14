@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 from dataclasses import dataclass
 from enum import Enum
 from typing import TextIO
@@ -31,6 +32,19 @@ class OutputMode(str, Enum):
         except ValueError as exc:
             choices = ", ".join(mode.value for mode in cls)
             raise ValueError(f"output_mode must be one of: {choices}") from exc
+
+
+def resolve_codex_bin(codex_bin: str | None) -> str | None:
+    """Resolve the Codex runtime used by this wrapper.
+
+    An explicit path always wins. Otherwise prefer the ``codex`` executable on
+    ``PATH`` so SDK-driven app-server requests use the same runtime as an
+    interactive Codex invocation. If Codex is not installed on ``PATH``, leave
+    the value unset and let ``openai-codex`` use its pinned bundled runtime.
+    """
+    if codex_bin is not None:
+        return codex_bin
+    return shutil.which("codex")
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,6 +88,7 @@ class ControllerConfig:
     resume_policy: ResumePolicy | None = None
 
     def __post_init__(self) -> None:
+        self.codex_bin = resolve_codex_bin(self.codex_bin)
         self.output_mode = OutputMode.parse(self.output_mode)
         if self.resume_policy is None:
             self.resume_policy = ResumePolicy()

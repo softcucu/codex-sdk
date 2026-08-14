@@ -4,11 +4,101 @@ import io
 import json
 
 import pytest
+from openai_codex import CodexConfig
 
-from codex_controller import OutputMode, ResumePolicy
+import codex_controller.config as config_module
+import codex_controller.controller as controller_module
+from codex_controller import (
+    CodexController,
+    ControllerConfig,
+    OutputMode,
+    ResumePolicy,
+    resolve_codex_bin,
+)
 from codex_controller.render import EventRenderer
 
 from conftest import Notification
+
+
+class _CapturingBackend:
+    configs: list[CodexConfig] = []
+
+    def __init__(self, config: CodexConfig) -> None:
+        type(self).configs.append(config)
+
+
+@pytest.fixture
+def capture_sdk_config(monkeypatch: pytest.MonkeyPatch) -> list[CodexConfig]:
+    _CapturingBackend.configs = []
+    monkeypatch.setattr(controller_module, "OfficialBackend", _CapturingBackend)
+    return _CapturingBackend.configs
+
+
+def test_default_codex_bin_uses_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        config_module.shutil,
+        "which",
+        lambda command: "/usr/local/bin/codex" if command == "codex" else None,
+    )
+
+    assert resolve_codex_bin(None) == "/usr/local/bin/codex"
+    assert ControllerConfig().codex_bin == "/usr/local/bin/codex"
+
+
+def test_explicit_codex_bin_wins(monkeypatch: pytest.MonkeyPatch) -> None:
+    def unexpected_lookup(_command: str) -> str | None:
+        pytest.fail("PATH must not be searched for an explicit codex_bin")
+
+    monkeypatch.setattr(config_module.shutil, "which", unexpected_lookup)
+
+    assert resolve_codex_bin("/opt/codex/bin/codex") == "/opt/codex/bin/codex"
+    assert ControllerConfig(codex_bin="/opt/custom/codex").codex_bin == (
+        "/opt/custom/codex"
+    )
+
+
+def test_missing_path_codex_falls_back_to_sdk_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(config_module.shutil, "which", lambda _command: None)
+
+    assert resolve_codex_bin(None) is None
+    assert ControllerConfig().codex_bin is None
+
+
+def test_controller_passes_path_runtime_to_sdk(
+    monkeypatch: pytest.MonkeyPatch,
+    capture_sdk_config: list[CodexConfig],
+) -> None:
+    monkeypatch.setattr(config_module.shutil, "which", lambda _command: "/bin/codex")
+
+    CodexController(cwd="/worktree", output_mode="quiet")
+
+    assert len(capture_sdk_config) == 1
+    assert capture_sdk_config[0].cwd == "/worktree"
+    assert capture_sdk_config[0].codex_bin == "/bin/codex"
+
+
+def test_controller_preserves_custom_sdk_config_while_resolving_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+    capture_sdk_config: list[CodexConfig],
+) -> None:
+    monkeypatch.setattr(config_module.shutil, "which", lambda _command: "/bin/codex")
+    supplied = CodexConfig(
+        cwd="/worktree",
+        config_overrides=('model="test-model"',),
+        client_name="custom-client",
+    )
+
+    CodexController(codex_config=supplied, output_mode="quiet")
+
+    assert len(capture_sdk_config) == 1
+    resolved = capture_sdk_config[0]
+    assert resolved is not supplied
+    assert resolved.codex_bin == "/bin/codex"
+    assert resolved.cwd == supplied.cwd
+    assert resolved.config_overrides == supplied.config_overrides
+    assert resolved.client_name == supplied.client_name
 
 
 @pytest.mark.parametrize(

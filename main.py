@@ -148,7 +148,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Codex event output format (default: human)",
     )
     parser.add_argument("--thread-id", help="continue an existing Codex thread")
-    parser.add_argument("--codex-bin", help="path to a specific Codex executable")
+    parser.add_argument(
+        "--codex-bin",
+        help="path to a specific Codex executable (default: codex on PATH, then SDK runtime)",
+    )
     return parser
 
 

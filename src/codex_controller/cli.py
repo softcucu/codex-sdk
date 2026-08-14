@@ -14,7 +14,10 @@ def build_parser() -> argparse.ArgumentParser:
         description="Run Codex turns and resilient Goals from Python's command line.",
     )
     parser.add_argument("--cwd", "-C", help="Codex working directory")
-    parser.add_argument("--codex-bin", help="Use a specific Codex executable")
+    parser.add_argument(
+        "--codex-bin",
+        help="Use a specific Codex executable (default: codex on PATH, then SDK runtime)",
+    )
     parser.add_argument(
         "--output-mode",
         choices=[mode.value for mode in OutputMode],
