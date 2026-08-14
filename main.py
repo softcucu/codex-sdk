@@ -15,7 +15,7 @@ import sys
 from pathlib import Path
 from typing import Sequence
 
-from codex_controller import (
+from src.codex_controller import (
     ApprovalMode,
     CodexController,
     ResumePolicy,
