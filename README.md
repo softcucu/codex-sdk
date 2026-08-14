@@ -293,6 +293,85 @@ codex-goal -C /path/to/repo --output-mode quiet --thread-id 019c... resume-goal
 codex-goal --help
 ```
 
+### 根目录 `main.py`
+
+仓库根目录提供了一个参数式入口，默认启动支持自动恢复的 Goal。基本格式如下；
+`--prompt` 和 `--prompt-file` 必须且只能指定一个：
+
+```text
+.venv/bin/python main.py [OPTIONS] (--prompt TEXT | --prompt-file PATH)
+```
+
+启动 Goal：
+
+```bash
+.venv/bin/python main.py \
+  --project-path /path/to/repo \
+  --model your-codex-model \
+  --retry-count 3 \
+  --prompt "让全部测试通过，以 pytest 结果为完成证据"
+```
+
+执行一个不自动恢复的普通 turn：
+
+```bash
+.venv/bin/python main.py \
+  --project-path /path/to/repo \
+  --task-type run \
+  --prompt "解释项目架构"
+```
+
+提示词较长时，可以用 `--prompt-file` 从 UTF-8 文本文件读取；它与 `--prompt` 二选一：
+
+```bash
+.venv/bin/python main.py \
+  --project-path /path/to/repo \
+  --model your-codex-model \
+  --retry-count 3 \
+  --prompt-file /path/to/prompt.md
+```
+
+继续已有 thread：
+
+```bash
+.venv/bin/python main.py \
+  --project-path /path/to/repo \
+  --thread-id 019c... \
+  --prompt "基于已有上下文完成后续修改并验证"
+```
+
+可设置参数：
+
+| 参数 | 含义 |
+| --- | --- |
+| `-h`, `--help` | 打印帮助并退出。 |
+| `-C PATH`, `--project-path PATH`, `--cwd PATH` | Codex 项目目录，必须是已经存在的目录；默认是当前目录。相对路径会转换为绝对路径。 |
+| `-m MODEL`, `--model MODEL` | 本次 turn 或 Goal 使用的模型；不传时使用本机 Codex 配置的默认模型。 |
+| `-r N`, `--retry-count N`, `--max-resumes N` | Goal 首次执行后最多自动恢复 `N` 次。`0` 表示不自动恢复；不传表示不限制次数。只影响 `goal`。 |
+| `-p TEXT`, `--prompt TEXT` | 普通 turn 的提示词，或 Goal 的 objective；与 `--prompt-file` 二选一。 |
+| `--prompt-file PATH` | 从 UTF-8 文本文件读取完整提示词；文件必须存在且可读，与 `--prompt` 二选一。 |
+| `--task-type {goal,run}` | `goal` 启动可自动恢复的 Goal；`run` 只执行一个普通 turn。默认是 `goal`。 |
+| `--token-budget N` | Goal 的正整数 token budget；只对 `--task-type goal` 生效。不传时不设置 Goal token budget。 |
+| `--max-elapsed-seconds SECONDS` | Goal 执行及自动恢复允许使用的最大总时长，必须大于 `0`；不传表示不限制总时长。只影响 `goal`。 |
+| `--initial-delay SECONDS` | Goal 第一次自动恢复前的基础等待时间，必须大于等于 `0`，默认 `5` 秒。后续等待使用指数退避并带少量随机抖动。 |
+| `--max-delay SECONDS` | Goal 单次自动恢复等待时间的上限，必须大于等于 `0`，默认 `300` 秒。 |
+| `--output-mode {quiet,human,debug}` | 输出模式：`quiet` 不打印事件，`human` 输出适合阅读的流式活动，`debug` 输出完整 JSONL 事件。默认是 `human`。 |
+| `--thread-id ID` | 恢复指定的已有 Codex thread 及其上下文，再执行本次 `run` 或启动一个新 Goal；不传时创建新 thread。它不会调用 `resume_goal()`，因此 `--task-type goal` 会用本次 objective 替换该 thread 上原有的 Goal。 |
+| `--codex-bin PATH` | 使用指定的 Codex 可执行文件；不传时使用 `openai-codex` SDK 自带或自动解析的 runtime。 |
+
+`main.py` 对新建和恢复的 thread 都固定使用 `Sandbox.workspace_write` 和
+`ApprovalMode.deny_all`：Codex 可以修改项目工作区和沙箱默认临时目录，但所有需要扩大
+权限的请求都会被拒绝，不会自动提权。
+
+退出码：任务完成返回 `0`，任务未完成返回 `2`，运行异常返回 `1`，用户按
+`Ctrl+C` 中断返回 `130`。
+
+查看当前版本的完整参数：
+
+```bash
+.venv/bin/python main.py --help
+```
+
 ## 开发和测试
 
 ```bash
