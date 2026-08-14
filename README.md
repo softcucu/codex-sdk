@@ -71,7 +71,9 @@ with CodexController(cwd=".") as codex:
     implementation = codex.run("实现修复", model="model-for-coding")
 ```
 
-Goal 会在激活前更新 thread 模型，所以 Goal 自动产生的首轮、后续 continuation，以及 429 后的自动 resume 都使用指定模型：
+新建或重新加载 thread 时，Goal 会把模型直接传给 `thread/start` 或 `thread/resume`；
+对于已经加载的 thread，则会在激活 Goal 前更新 thread settings。因此 Goal 自动产生的
+首轮、后续 continuation，以及 429 后的自动 resume 都使用指定模型：
 
 ```python
 with CodexController(cwd=".") as codex:

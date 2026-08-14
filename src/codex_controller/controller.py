@@ -90,7 +90,9 @@ class CodexController:
         self._operation_lock = threading.RLock()
 
     def __enter__(self) -> "CodexController":
-        self._ensure_thread()
+        # Connect eagerly, but leave thread creation to the first operation so
+        # a per-operation model can be applied by thread/start itself.
+        self._ensure_connected()
         return self
 
     def __exit__(self, _exc_type: Any, _exc: Any, _tb: Any) -> None:
@@ -140,7 +142,8 @@ class CodexController:
                 raise ValueError("model must not be empty")
             turn_options["model"] = model
         with self._operation_lock:
-            thread_id = self._ensure_thread()
+            thread_options = {"model": model} if model is not None else {}
+            thread_id = self._ensure_thread(**thread_options)
             operation = self._backend.start_turn(prompt, **turn_options)
             try:
                 collected = self._collect(operation)
@@ -185,7 +188,8 @@ class CodexController:
                     options.setdefault("model", model)
                 self.start_thread(**options)
             else:
-                self._ensure_thread()
+                options = {"model": model} if model is not None else {}
+                self._ensure_thread(**options)
             return self._run_goal_loop(
                 objective=objective,
                 token_budget=token_budget,
@@ -198,7 +202,8 @@ class CodexController:
         if model is not None and not model.strip():
             raise ValueError("model must not be empty")
         with self._operation_lock:
-            self._ensure_thread()
+            thread_options = {"model": model} if model is not None else {}
+            self._ensure_thread(**thread_options)
             current = self.get_goal()
             if current is None:
                 raise NoActiveGoalError(f"thread {self._thread_id} has no Goal to resume")
@@ -465,14 +470,14 @@ class CodexController:
             self._backend.connect()
             self._connected = True
 
-    def _ensure_thread(self) -> str:
+    def _ensure_thread(self, **options: Any) -> str:
         self._ensure_connected()
         if self._backend.thread_id is not None:
             self._thread_id = self._backend.thread_id
             return self._thread_id
         if self._thread_id is not None:
-            return self.resume_thread(self._thread_id)
-        return self.start_thread()
+            return self.resume_thread(self._thread_id, **options)
+        return self.start_thread(**options)
 
     def _check_resume_budget(
         self,

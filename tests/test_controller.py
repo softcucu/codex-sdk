@@ -46,10 +46,48 @@ def test_goal_automatically_resumes_after_429_and_completes() -> None:
     assert backend.start_goal_calls == 1
     assert backend.resume_goal_calls == 1
     assert backend.goal_models == ["model-goal", "model-goal"]
+    assert backend.start_thread_options == [
+        {"ephemeral": False, "model": "model-goal"}
+    ]
     rendered = output.getvalue()
     assert "rate limit" in rendered
     assert "resumed Goal" in rendered
     assert "goal   complete" in rendered
+
+
+def test_context_manager_defers_thread_creation_until_goal_model_is_known() -> None:
+    backend = FakeBackend(first_status="complete")
+    controller = CodexController(
+        _backend=backend,
+        output=io.StringIO(),
+        output_mode="quiet",
+        resume_policy=no_delay_policy(),
+    )
+
+    with controller as active:
+        assert active.thread_id is None
+        result = active.goal("use the selected model", model="selected-model")
+
+    assert result.completed
+    assert backend.start_thread_options == [
+        {"ephemeral": False, "model": "selected-model"}
+    ]
+
+
+def test_existing_thread_is_resumed_with_goal_model_override() -> None:
+    backend = FakeBackend(first_status="complete")
+    controller = CodexController(
+        thread_id="thread-existing",
+        _backend=backend,
+        output=io.StringIO(),
+        output_mode="quiet",
+        resume_policy=no_delay_policy(),
+    )
+
+    result = controller.goal("continue with selected model", model="selected-model")
+
+    assert result.completed
+    assert backend.resume_thread_options == [{"model": "selected-model"}]
 
 
 def test_quiet_mode_writes_nothing() -> None:

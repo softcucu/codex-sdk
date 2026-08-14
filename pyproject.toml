@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "codex-goal-controller"
-version = "0.2.1"
+version = "0.2.2"
 description = "A Python controller for Codex with resilient Goal resume and configurable output."
 readme = "README.md"
 requires-python = ">=3.10"

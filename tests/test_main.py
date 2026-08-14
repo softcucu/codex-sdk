@@ -68,6 +68,7 @@ def test_main_forwards_goal_arguments(monkeypatch, tmp_path) -> None:
         {
             "sandbox": main_module.Sandbox.workspace_write,
             "approval_mode": main_module.ApprovalMode.deny_all,
+            "model": "test-model",
         },
     )
     assert FakeController.call == (
@@ -131,6 +132,8 @@ def test_main_resumes_thread_with_restricted_permissions(monkeypatch, tmp_path) 
             str(tmp_path),
             "--thread-id",
             "thread-123",
+            "--model",
+            "resume-model",
             "--prompt",
             "continue",
         ]
@@ -143,5 +146,6 @@ def test_main_resumes_thread_with_restricted_permissions(monkeypatch, tmp_path) 
         {
             "sandbox": main_module.Sandbox.workspace_write,
             "approval_mode": main_module.ApprovalMode.deny_all,
+            "model": "resume-model",
         },
     )

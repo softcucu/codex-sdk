@@ -236,7 +236,10 @@ class CodexThreadPool:
     @staticmethod
     def _execute_run(controller: CodexController, task: RunTask) -> RunResult:
         if task.thread_id is not None:
-            controller.resume_thread(task.thread_id, cwd=task.cwd)
+            options: dict[str, Any] = {"cwd": task.cwd}
+            if task.model is not None:
+                options["model"] = task.model
+            controller.resume_thread(task.thread_id, **options)
         elif task.thread_options:
             options = dict(task.thread_options)
             if task.model is not None:
@@ -247,7 +250,10 @@ class CodexThreadPool:
     @staticmethod
     def _execute_goal(controller: CodexController, task: GoalTask) -> GoalResult:
         if task.thread_id is not None:
-            controller.resume_thread(task.thread_id, cwd=task.cwd)
+            options: dict[str, Any] = {"cwd": task.cwd}
+            if task.model is not None:
+                options["model"] = task.model
+            controller.resume_thread(task.thread_id, **options)
         return controller.goal(
             task.objective,
             model=task.model,
@@ -258,7 +264,10 @@ class CodexThreadPool:
     @staticmethod
     def _execute_resume_goal(controller: CodexController, task: GoalTask) -> GoalResult:
         assert task.thread_id is not None
-        controller.resume_thread(task.thread_id, cwd=task.cwd)
+        options: dict[str, Any] = {"cwd": task.cwd}
+        if task.model is not None:
+            options["model"] = task.model
+        controller.resume_thread(task.thread_id, **options)
         return controller.resume_goal(model=task.model)
 
     def _emit_task_output(self, task_id: int, kind: str, rendered: TextIO) -> None:

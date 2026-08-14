@@ -174,6 +174,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             "sandbox": Sandbox.workspace_write,
             "approval_mode": ApprovalMode.deny_all,
         }
+        if args.model is not None:
+            thread_options["model"] = args.model
         if args.thread_id is None:
             codex.start_thread(**thread_options)
         else:

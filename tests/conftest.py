@@ -53,6 +53,8 @@ class FakeBackend:
         self.closed = False
         self.turn_models: list[str | None] = []
         self.goal_models: list[str | None] = []
+        self.start_thread_options: list[dict[str, Any]] = []
+        self.resume_thread_options: list[dict[str, Any]] = []
 
     @property
     def thread_id(self) -> str | None:
@@ -67,10 +69,12 @@ class FakeBackend:
 
     def start_thread(self, **options: Any) -> str:
         assert options.get("ephemeral") is False
+        self.start_thread_options.append(dict(options))
         self._thread_id = "thread-1"
         return self._thread_id
 
     def resume_thread(self, thread_id: str, **options: Any) -> str:
+        self.resume_thread_options.append(dict(options))
         self._thread_id = thread_id
         return thread_id
 
