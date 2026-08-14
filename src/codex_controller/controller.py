@@ -57,6 +57,7 @@ class CodexController:
         codex_config: CodexConfig | None = None,
         output_mode: OutputMode | str = OutputMode.HUMAN,
         output: Any = None,
+        log_context: dict[str, Any] | None = None,
         resume_policy: ResumePolicy | None = None,
         _backend: Backend | None = None,
         _sleep: Callable[[float], None] = time.sleep,
@@ -74,7 +75,11 @@ class CodexController:
         )
         sdk_config = codex_config or CodexConfig(cwd=cwd, codex_bin=codex_bin)
         self._backend = _backend or OfficialBackend(sdk_config)
-        self._renderer = EventRenderer(public_config.output_mode, public_config.output)
+        self._renderer = EventRenderer(
+            public_config.output_mode,
+            public_config.output,
+            context=log_context,
+        )
         assert public_config.resume_policy is not None
         self._resume_policy = public_config.resume_policy
         self._thread_id = thread_id
@@ -122,8 +127,18 @@ class CodexController:
             self._renderer.wrapper_event("thread.resumed", thread_id=resumed_id)
             return resumed_id
 
-    def run(self, prompt: Any, **turn_options: Any) -> RunResult:
-        """Run one ordinary Codex turn and stream it using the selected mode."""
+    def run(
+        self,
+        prompt: Any,
+        *,
+        model: str | None = None,
+        **turn_options: Any,
+    ) -> RunResult:
+        """Run one turn, optionally overriding its model and subsequent thread turns."""
+        if model is not None:
+            if not model.strip():
+                raise ValueError("model must not be empty")
+            turn_options["model"] = model
         with self._operation_lock:
             thread_id = self._ensure_thread()
             operation = self._backend.start_turn(prompt, **turn_options)
@@ -138,6 +153,7 @@ class CodexController:
                 thread_id=thread_id,
                 turn_id=collected.turn_id,
                 status=collected.status or "unknown",
+                model=model,
                 final_response=collected.final_response,
                 items=collected.items,
                 usage=collected.usage,
@@ -149,6 +165,7 @@ class CodexController:
         self,
         objective: str,
         *,
+        model: str | None = None,
         token_budget: int | None = None,
         thread_options: dict[str, Any] | None = None,
     ) -> GoalResult:
@@ -159,29 +176,43 @@ class CodexController:
         """
         if not objective.strip():
             raise ValueError("objective must not be empty")
+        if model is not None and not model.strip():
+            raise ValueError("model must not be empty")
         with self._operation_lock:
             if self._thread_id is None:
-                self.start_thread(**(thread_options or {}))
+                options = dict(thread_options or {})
+                if model is not None:
+                    options.setdefault("model", model)
+                self.start_thread(**options)
             else:
                 self._ensure_thread()
             return self._run_goal_loop(
                 objective=objective,
                 token_budget=token_budget,
+                model=model,
                 start_new=True,
             )
 
-    def resume_goal(self) -> GoalResult:
-        """Resume the selected thread's existing Goal until it stops terminally."""
+    def resume_goal(self, *, model: str | None = None) -> GoalResult:
+        """Resume an existing Goal, optionally changing its model first."""
+        if model is not None and not model.strip():
+            raise ValueError("model must not be empty")
         with self._operation_lock:
             self._ensure_thread()
             current = self.get_goal()
             if current is None:
                 raise NoActiveGoalError(f"thread {self._thread_id} has no Goal to resume")
             if current.completed:
-                return GoalResult(thread_id=current.thread_id, goal=current, resume_count=0)
+                return GoalResult(
+                    thread_id=current.thread_id,
+                    goal=current,
+                    resume_count=0,
+                    model=model,
+                )
             return self._run_goal_loop(
                 objective=current.objective,
                 token_budget=current.token_budget,
+                model=model,
                 start_new=False,
             )
 
@@ -215,6 +246,7 @@ class CodexController:
         *,
         objective: str,
         token_budget: int | None,
+        model: str | None,
         start_new: bool,
     ) -> GoalResult:
         assert self._thread_id is not None
@@ -236,11 +268,15 @@ class CodexController:
             caught_retryable_exception = False
             try:
                 if action == "start":
-                    self._renderer.wrapper_event("goal.started", objective=objective)
-                    operation = self._backend.start_goal(objective, token_budget)
+                    self._renderer.wrapper_event(
+                        "goal.started", objective=objective, model=model
+                    )
+                    operation = self._backend.start_goal(objective, token_budget, model)
                 else:
-                    self._renderer.wrapper_event("goal.resumed", attempt=resume_count)
-                    operation = self._backend.resume_goal()
+                    self._renderer.wrapper_event(
+                        "goal.resumed", attempt=resume_count, model=model
+                    )
+                    operation = self._backend.resume_goal(model)
 
                 collected = self._collect(operation)
                 items.extend(collected.items)
@@ -288,6 +324,7 @@ class CodexController:
                 result = self._goal_result(
                     current_goal,
                     resume_count,
+                    model,
                     final_response,
                     items,
                     usage,
@@ -306,6 +343,7 @@ class CodexController:
                 result = self._goal_result(
                     current_goal,
                     resume_count,
+                    model,
                     final_response,
                     items,
                     usage,
@@ -332,6 +370,7 @@ class CodexController:
                 result = self._goal_result(
                     fallback,
                     resume_count,
+                    model,
                     final_response,
                     items,
                     usage,
@@ -351,6 +390,7 @@ class CodexController:
                     token_budget=token_budget,
                 ),
                 resume_count,
+                model,
                 final_response,
                 items,
                 usage,
@@ -470,6 +510,7 @@ class CodexController:
     def _goal_result(
         goal: GoalState,
         resume_count: int,
+        model: str | None,
         final_response: str | None,
         items: list[Any],
         usage: Any,
@@ -481,6 +522,7 @@ class CodexController:
             thread_id=goal.thread_id,
             goal=goal,
             resume_count=resume_count,
+            model=model,
             final_response=final_response,
             items=list(items),
             usage=usage,

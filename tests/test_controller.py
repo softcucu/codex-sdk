@@ -33,15 +33,19 @@ def test_goal_automatically_resumes_after_429_and_completes() -> None:
         resume_policy=no_delay_policy(),
     )
 
-    result = controller.goal("make the tests pass", token_budget=1000)
+    result = controller.goal(
+        "make the tests pass", model="model-goal", token_budget=1000
+    )
 
     assert result.completed
     assert result.goal.status == "complete"
     assert result.resume_count == 1
     assert result.final_response == "done"
     assert result.goal.tokens_used == 42
+    assert result.model == "model-goal"
     assert backend.start_goal_calls == 1
     assert backend.resume_goal_calls == 1
+    assert backend.goal_models == ["model-goal", "model-goal"]
     rendered = output.getvalue()
     assert "rate limit" in rendered
     assert "resumed Goal" in rendered
@@ -151,11 +155,13 @@ def test_regular_turn_returns_final_message() -> None:
         output_mode="quiet",
     )
 
-    result = controller.run("hello")
+    result = controller.run("hello", model="model-turn")
 
     assert result.completed
     assert result.final_response == "hello"
     assert result.event_count == 4
+    assert result.model == "model-turn"
+    assert backend.turn_models == ["model-turn"]
 
 
 def test_pause_get_and_clear_goal() -> None:
@@ -174,4 +180,3 @@ def test_pause_get_and_clear_goal() -> None:
     assert controller.get_goal() == paused
     assert controller.clear_goal()
     assert controller.get_goal() is None
-

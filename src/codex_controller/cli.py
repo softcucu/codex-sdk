@@ -21,6 +21,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=OutputMode.HUMAN.value,
     )
     parser.add_argument("--thread-id", help="Resume an existing Codex thread")
+    parser.add_argument("--model", help="Model override for this run or Goal")
     parser.add_argument(
         "--max-resumes",
         type=int,
@@ -61,13 +62,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             resume_policy=policy,
         ) as codex:
             if args.command == "run":
-                result = codex.run(args.prompt)
+                result = codex.run(args.prompt, model=args.model)
                 return 0 if result.completed else 2
             if args.command == "goal":
-                result = codex.goal(args.objective, token_budget=args.token_budget)
+                result = codex.goal(
+                    args.objective,
+                    model=args.model,
+                    token_budget=args.token_budget,
+                )
                 return 0 if result.completed else 2
             if args.command == "resume-goal":
-                result = codex.resume_goal()
+                result = codex.resume_goal(model=args.model)
                 return 0 if result.completed else 2
             if args.command == "show-goal":
                 goal = codex.get_goal()

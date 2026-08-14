@@ -6,6 +6,7 @@ Codex 的 Python 控制封装，基于官方 `openai-codex` SDK 和本地 app-se
 
 - 使用 Codex 的持久化 Goal（等价于 `/goal`），遇到 HTTP 429、服务过载、响应流断开或非主动暂停后，自动执行 `/goal resume` 的协议等价操作。
 - 支持 `quiet`、`human`、`debug` 三种输出模式，默认 `human`。
+- 每个普通 turn 或 Goal 都能独立指定模型，并支持多个独立 Codex thread 并发执行。
 
 项目要求 Python 3.10 或更高版本。官方资料：[Codex Python SDK](https://learn.chatgpt.com/docs/codex-sdk#python-library)、[Using Goals in Codex](https://developers.openai.com/cookbook/examples/codex/using_goals_in_codex)、[app-server API](https://learn.chatgpt.com/docs/app-server#api-overview)。
 
@@ -28,7 +29,8 @@ from codex_controller import CodexController
 
 with CodexController(cwd="/path/to/repository") as codex:
     result = codex.goal(
-        "让全部测试通过，并且不改变公开 API；以完整测试套件结果作为完成证据"
+        "让全部测试通过，并且不改变公开 API；以完整测试套件结果作为完成证据",
+        model="your-codex-model",
     )
 
 print(result.completed)
@@ -55,9 +57,99 @@ with CodexController(
 
 ```python
 with CodexController(cwd="/path/to/repository") as codex:
-    result = codex.run("解释这个项目的架构")
+    result = codex.run("解释这个项目的架构", model="your-fast-model")
     print(result.final_response)
 ```
+
+## 每次任务指定模型
+
+普通 turn 的 `model=` 只覆盖这次任务，并按照 Codex 协议成为该 thread 后续 turns 的设置：
+
+```python
+with CodexController(cwd=".") as codex:
+    analysis = codex.run("分析失败原因", model="model-for-analysis")
+    implementation = codex.run("实现修复", model="model-for-coding")
+```
+
+Goal 会在激活前更新 thread 模型，所以 Goal 自动产生的首轮、后续 continuation，以及 429 后的自动 resume 都使用指定模型：
+
+```python
+with CodexController(cwd=".") as codex:
+    result = codex.goal(
+        "修复全部失败并运行测试验证",
+        model="model-for-coding",
+    )
+```
+
+恢复已有 Goal 时也可切换模型：
+
+```python
+with CodexController(cwd=".", thread_id="019c...") as codex:
+    result = codex.resume_goal(model="another-model")
+```
+
+模型名称会原样交给 Codex runtime 校验；封装不会维护一份容易过期的模型白名单。
+返回结果中的 `result.model` 表示本次请求的模型覆盖值；如果 Codex runtime 因服务能力发生模型 reroute，应以 debug 事件中的 `model/rerouted` 为准。
+
+## 多线程并发调用
+
+`CodexThreadPool` 基于 Python `ThreadPoolExecutor`。每个任务使用独立的 `CodexController`、app-server 连接和 Codex thread，因此不会共享当前 turn 或 Goal 状态：
+
+```python
+from codex_controller import CodexThreadPool
+
+
+with CodexThreadPool(max_workers=3, output_mode="human") as pool:
+    futures = [
+        pool.submit_goal(
+            "修复项目 A 的测试",
+            cwd="/work/project-a",
+            model="model-a",
+        ),
+        pool.submit_goal(
+            "审计项目 B 并输出报告",
+            cwd="/work/project-b",
+            model="model-b",
+        ),
+        pool.submit_run(
+            "解释项目 C 的架构",
+            cwd="/work/project-c",
+            model="model-c",
+        ),
+    ]
+
+    results = [future.result() for future in futures]
+```
+
+也可以用任务对象批量提交，返回顺序与输入一致：
+
+```python
+from codex_controller import CodexThreadPool, GoalTask
+
+
+tasks = [
+    GoalTask("完成任务 A", model="model-a", cwd="/work/a"),
+    GoalTask("完成任务 B", model="model-b", cwd="/work/b"),
+]
+
+with CodexThreadPool(max_workers=2) as pool:
+    results = pool.map_goals(tasks)
+```
+
+已有 Goal 也能并发恢复：
+
+```python
+future = pool.submit_resume_goal("thread-id", model="selected-model", cwd="/work/a")
+```
+
+并发输出策略：
+
+- `quiet` 不输出；
+- `human` 和 `debug` 为每个任务单独缓冲，任务结束时原子写出，避免多线程日志交叉；
+- 超过 1 MiB 的任务日志自动滚动到临时文件，避免长期 Goal 一直占用内存；
+- `debug` 记录包含 `context.pool_task_id`，可以区分并发任务。
+
+同一个 `CodexController` 表示一个当前 thread，内部会串行化操作。需要并行时应使用 `CodexThreadPool`。如果多个任务会修改同一代码仓库，请给它们使用不同 Git worktree 或确保写入范围互不重叠，否则并发文件修改本身仍可能冲突。
 
 ## 三种输出模式
 
@@ -190,6 +282,7 @@ finally:
 
 ```bash
 codex-goal -C /path/to/repo goal "让全部测试通过，以 pytest 结果为完成证据"
+codex-goal -C /path/to/repo --model your-codex-model goal "完成迁移并验证"
 codex-goal -C /path/to/repo --output-mode debug goal "定位性能回退"
 codex-goal -C /path/to/repo --output-mode quiet --thread-id 019c... resume-goal
 ```
@@ -208,7 +301,7 @@ python3.11 -m venv .venv
 .venv/bin/pytest
 ```
 
-单元测试不调用模型，不消耗 API 配额；它使用结构化假事件验证 429、transport 重连、恢复次数限制和三种日志模式。
+单元测试不调用模型，不消耗 API 配额；它使用结构化假事件验证按任务选择模型、真正的多线程并发、429、transport 重连、恢复次数限制和三种日志模式。
 
 ## 兼容性说明
 

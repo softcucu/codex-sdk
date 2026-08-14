@@ -51,6 +51,8 @@ class FakeBackend:
         self.reconnect_calls = 0
         self.cancel_calls = 0
         self.closed = False
+        self.turn_models: list[str | None] = []
+        self.goal_models: list[str | None] = []
 
     @property
     def thread_id(self) -> str | None:
@@ -78,10 +80,14 @@ class FakeBackend:
         return thread_id
 
     def start_turn(self, prompt: Any, **options: Any) -> Operation:
+        self.turn_models.append(options.get("model"))
         return Operation("turn-normal", iter(completed_events(str(prompt))), self._cancel)
 
-    def start_goal(self, objective: str, token_budget: int | None) -> Operation:
+    def start_goal(
+        self, objective: str, token_budget: int | None, model: str | None
+    ) -> Operation:
         self.start_goal_calls += 1
+        self.goal_models.append(model)
         self.goal = self._goal_payload(objective, self.first_status, token_budget)
         error = {
             "message": "429 rate limit exceeded",
@@ -99,8 +105,9 @@ class FakeBackend:
         ]
         return Operation("turn-1", iter(events), self._cancel)
 
-    def resume_goal(self) -> Operation:
+    def resume_goal(self, model: str | None) -> Operation:
         self.resume_goal_calls += 1
+        self.goal_models.append(model)
         assert self.goal is not None
         self.goal = self._goal_payload(
             str(self.goal["objective"]), "complete", self.goal.get("tokenBudget")
@@ -142,10 +149,13 @@ class DisconnectingBackend(FakeBackend):
         super().__init__()
         self.disconnected = False
 
-    def start_goal(self, objective: str, token_budget: int | None) -> Operation:
+    def start_goal(
+        self, objective: str, token_budget: int | None, model: str | None
+    ) -> Operation:
         from openai_codex import TransportClosedError
 
         self.start_goal_calls += 1
+        self.goal_models.append(model)
         self.goal = self._goal_payload(objective, "usageLimited", token_budget)
         self.disconnected = True
 

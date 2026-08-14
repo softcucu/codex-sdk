@@ -11,6 +11,7 @@ from openai_codex.generated.v2_all import (
     ThreadGoalSetResponse,
     ThreadGoalStatus,
 )
+from pydantic import BaseModel
 
 from .errors import IncompatibleCodexSdkError, NoActiveGoalError
 
@@ -46,15 +47,21 @@ class Backend(Protocol):
 
     def start_turn(self, prompt: Any, **options: Any) -> Operation: ...
 
-    def start_goal(self, objective: str, token_budget: int | None) -> Operation: ...
+    def start_goal(
+        self, objective: str, token_budget: int | None, model: str | None
+    ) -> Operation: ...
 
-    def resume_goal(self) -> Operation: ...
+    def resume_goal(self, model: str | None) -> Operation: ...
 
     def get_goal(self) -> Any | None: ...
 
     def pause_goal(self) -> Any: ...
 
     def clear_goal(self) -> Any: ...
+
+
+class _ThreadSettingsUpdateResponse(BaseModel):
+    pass
 
 
 class OfficialBackend:
@@ -112,7 +119,12 @@ class OfficialBackend:
             cancel_callback=handle.interrupt,
         )
 
-    def start_goal(self, objective: str, token_budget: int | None) -> Operation:
+    def start_goal(
+        self,
+        objective: str,
+        token_budget: int | None,
+        model: str | None,
+    ) -> Operation:
         if not objective.strip():
             raise ValueError("objective must not be empty")
         if token_budget is not None and token_budget <= 0:
@@ -126,6 +138,8 @@ class OfficialBackend:
                 raise RuntimeError(f"thread must be idle before starting a Goal: {thread_id}")
             if thread.ephemeral or thread.path is None:
                 raise RuntimeError(f"thread must be persisted before starting a Goal: {thread_id}")
+            if model is not None:
+                self._set_model(client, thread_id, model)
 
             state = client.reserve_goal_operation(thread_id)
             activated = False
@@ -156,7 +170,7 @@ class OfficialBackend:
                 client.unregister_goal_operation(state)
                 raise
 
-    def resume_goal(self) -> Operation:
+    def resume_goal(self, model: str | None) -> Operation:
         client, thread_id = self._client_and_thread_id()
         self._assert_goal_support(client)
         current = self.get_goal()
@@ -167,6 +181,8 @@ class OfficialBackend:
             state = client.reserve_goal_operation(thread_id)
             activated = False
             try:
+                if model is not None:
+                    self._set_model(client, thread_id, model)
                 state.activate_turn_routing()
                 client.thread_goal_set(thread_id, status=ThreadGoalStatus.active)
                 activated = True
@@ -223,6 +239,16 @@ class OfficialBackend:
             raise IncompatibleCodexSdkError(
                 "installed openai-codex SDK lacks Goal protocol support: " + ", ".join(missing)
             )
+
+    @staticmethod
+    def _set_model(client: Any, thread_id: str, model: str) -> None:
+        if not model.strip():
+            raise ValueError("model must not be empty")
+        client.request(
+            "thread/settings/update",
+            {"threadId": thread_id, "model": model},
+            response_model=_ThreadSettingsUpdateResponse,
+        )
 
     @staticmethod
     def _goal_operation(client: Any, state: Any, logical_turn_id: str) -> Operation:

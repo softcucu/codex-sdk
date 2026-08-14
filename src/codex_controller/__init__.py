@@ -11,6 +11,7 @@ from .errors import (
     NoActiveGoalError,
 )
 from .models import GoalResult, GoalState, RunResult
+from .pool import CodexThreadPool, GoalTask, RunTask
 
 __all__ = [
     "ApprovalMode",
@@ -23,11 +24,13 @@ __all__ = [
     "GoalState",
     "GoalResult",
     "RunResult",
+    "CodexThreadPool",
+    "GoalTask",
+    "RunTask",
     "CodexControllerError",
     "GoalResumeExhaustedError",
     "IncompatibleCodexSdkError",
     "NoActiveGoalError",
 ]
 
-__version__ = "0.1.0"
-
+__version__ = "0.2.0"

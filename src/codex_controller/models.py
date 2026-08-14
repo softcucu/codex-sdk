@@ -23,6 +23,7 @@ class RunResult:
     thread_id: str
     turn_id: str
     status: str
+    model: str | None = None
     final_response: str | None = None
     items: list[Any] = field(default_factory=list)
     usage: Any = None
@@ -39,6 +40,7 @@ class GoalResult:
     thread_id: str
     goal: GoalState
     resume_count: int
+    model: str | None = None
     final_response: str | None = None
     items: list[Any] = field(default_factory=list)
     usage: Any = None
@@ -86,4 +88,3 @@ def normalize_goal(goal: Any, *, fallback_thread_id: str = "") -> GoalState | No
         tokens_used=int(data.get("tokensUsed", 0)),
         time_used_seconds=int(data.get("timeUsedSeconds", 0)),
     )
-

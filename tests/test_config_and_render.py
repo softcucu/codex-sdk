@@ -68,3 +68,18 @@ def test_debug_renderer_preserves_unknown_payload() -> None:
     assert record["event"] == "future/event"
     assert record["data"] == {"newField": [1, 2, 3]}
 
+
+def test_debug_renderer_includes_pool_task_context() -> None:
+    output = io.StringIO()
+    renderer = EventRenderer(
+        "debug",
+        output,
+        context={"pool_task_id": 7, "pool_task_kind": "goal"},
+    )
+    renderer.notification(Notification("turn/started", {"turn": {"id": "t"}}))
+
+    record = json.loads(output.getvalue())
+    assert record["context"] == {
+        "pool_task_id": 7,
+        "pool_task_kind": "goal",
+    }

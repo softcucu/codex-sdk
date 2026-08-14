@@ -13,13 +13,20 @@ from .models import model_to_data
 class EventRenderer:
     """Render app-server notifications in quiet, human, or JSONL debug form."""
 
-    def __init__(self, mode: OutputMode | str, output: TextIO | None = None) -> None:
+    def __init__(
+        self,
+        mode: OutputMode | str,
+        output: TextIO | None = None,
+        *,
+        context: dict[str, Any] | None = None,
+    ) -> None:
         self.mode = OutputMode.parse(mode)
         self.output = output or sys.stdout
         self._lock = threading.Lock()
         self._sequence = 0
         self._open_channel: tuple[str, str] | None = None
         self._seen_agent_deltas: set[str] = set()
+        self._context = dict(context or {})
 
     def wrapper_event(self, name: str, **data: Any) -> None:
         if self.mode is OutputMode.QUIET:
@@ -34,9 +41,13 @@ class EventRenderer:
             elif name == "thread.resumed":
                 self._line(f"codex  resumed thread {data.get('thread_id')}")
             elif name == "goal.started":
-                self._line(f"goal   {data.get('objective', '')}")
+                model = f" [{data.get('model')}]" if data.get("model") else ""
+                self._line(f"goal{model}   {data.get('objective', '')}")
             elif name == "goal.resumed":
-                self._line(f"↻      resumed Goal (attempt {data.get('attempt')})")
+                model = f" with {data.get('model')}" if data.get("model") else ""
+                self._line(
+                    f"↻      resumed Goal{model} (attempt {data.get('attempt')})"
+                )
             elif name == "goal.retry":
                 delay = float(data.get("delay_seconds", 0.0))
                 reason = str(data.get("reason", "transient interruption"))
@@ -209,6 +220,8 @@ class EventRenderer:
             "event": event,
             "data": model_to_data(data),
         }
+        if self._context:
+            record["context"] = model_to_data(self._context)
         self.output.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
         self.output.flush()
 
@@ -218,4 +231,3 @@ class EventRenderer:
         if len(single_line) <= limit:
             return single_line
         return single_line[: limit - 1] + "…"
-

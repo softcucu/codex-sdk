@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "codex-goal-controller"
-version = "0.1.0"
+version = "0.2.0"
 description = "A Python controller for Codex with resilient Goal resume and configurable output."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -33,4 +33,3 @@ testpaths = ["tests"]
 [tool.coverage.run]
 branch = true
 source = ["codex_controller"]
-
