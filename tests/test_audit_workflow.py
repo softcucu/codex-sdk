@@ -224,7 +224,7 @@ class WorkflowFakeController:
 
     @staticmethod
     def _task_id(objective: str) -> str:
-        if "完整、可验证、可复用的协议与消息处理面清单" in objective:
+        if '"task_id"' not in objective and "protocol_inventory.jsonl" in objective:
             return "attack-surface"
         return WorkflowFakeController._json_field(objective, "task_id")
 
@@ -267,6 +267,25 @@ def test_workflow_completes_with_flat_uniquely_named_results_and_reuses_them(
     assert second.status is AuditWorkflowStatus.COMPLETE
     assert len(WorkflowFakeController.goal_calls) == 3
     assert WorkflowFakeController.resume_calls == []
+
+
+def test_attack_surface_schema_is_installed_before_bounded_goal_is_created(
+    tmp_path: Path,
+) -> None:
+    active = workflow(tmp_path)
+
+    spec = active._attack_surface_spec()
+
+    assert len(spec.objective) <= 4000
+    assert "${inventory_schema_path}" not in spec.objective
+    assert "./protocol-analysis/inventory_schema.json" in spec.objective
+    schema = json.loads(
+        (tmp_path / "protocol-analysis" / "inventory_schema.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert "protocol_record" in schema["$defs"]
+    assert "message_record" in schema["$defs"]
 
 
 def test_empty_manual_attack_surface_marker_skips_expensive_first_stage(

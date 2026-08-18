@@ -24,6 +24,7 @@ from .controller import CodexController
 
 
 _STATE_SCHEMA_VERSION = 1
+_MAX_GOAL_OBJECTIVE_CHARS = 4000
 _AUDIT_VERDICTS = {
     "VULNERABLE",
     "NO_CONFIRMED_VULNERABILITY",
@@ -70,6 +71,7 @@ class AuditWorkflowConfig:
     output_mode: OutputMode | str = OutputMode.HUMAN
     output: TextIO | None = field(default=None, compare=False, repr=False)
     attack_surface_prompt: str | Path | None = None
+    attack_surface_schema: str | Path | None = None
     message_prompt: str | Path | None = None
     protocol_prompt: str | Path | None = None
 
@@ -283,6 +285,7 @@ class VulnerabilityAuditWorkflow:
         self.state_path = self.workflow_dir / "state.json"
         self.lock_path = self.workflow_dir / "workflow.lock"
         self.attack_marker_path = self.output_dir / "ATTACK_SURFACE_COMPLETE.json"
+        self.inventory_schema_path = self.output_dir / "inventory_schema.json"
         self.finished_path = self.results_root / "WORKFLOW_FINISHED.json"
         self.index_path = self.results_root / "RESULT_INDEX.jsonl"
         self.summary_path = self.results_root / "SUMMARY.md"
@@ -365,26 +368,64 @@ class VulnerabilityAuditWorkflow:
         _atomic_write_json(self.state_path, self._state)
 
     def _attack_surface_spec(self) -> _TaskSpec:
-        prompt = self._read_prompt(
-            "attack_surface_analysis_goal.txt", self.config.attack_surface_prompt
+        schema_hash = self._install_inventory_schema()
+        prompt = Template(
+            self._read_prompt(
+                "attack_surface_analysis_goal.txt", self.config.attack_surface_prompt
+            )
+        ).substitute(
+            output_dir=self._project_prompt_path(self.output_dir),
+            inventory_schema_path=self._project_prompt_path(
+                self.inventory_schema_path
+            ),
         )
         objective = re.sub(r"^\s*/goal(?:\s+|$)", "", prompt, count=1)
-        default_output = Path(self.config.project_dir) / "protocol-analysis"
-        if self.output_dir != default_output:
-            objective += (
-                "\n\n## 本次输出目录\n\n"
-                "将提示词中的 `./protocol-analysis/` 替换为 "
-                f"`{_prompt_text(self.output_dir)}/`，"
-                "其他输出要求不变。\n"
+        if len(objective) > _MAX_GOAL_OBJECTIVE_CHARS:
+            raise AuditWorkflowError(
+                "attack-surface Goal objective is "
+                f"{len(objective)} characters; maximum is "
+                f"{_MAX_GOAL_OBJECTIVE_CHARS}"
             )
         return _TaskSpec(
             task_id="attack-surface",
             kind="attack-surface",
             objective=objective,
-            input_hash=_hash_text(objective),
+            input_hash=_hash_json(
+                {"objective": objective, "inventory_schema_sha256": schema_hash}
+            ),
             model=self.config.attack_surface_model or self.config.model,
             token_budget=self.config.attack_surface_token_budget,
         )
+
+    def _install_inventory_schema(self) -> str:
+        schema_text = self._read_prompt(
+            "attack_surface_inventory_schema.json",
+            self.config.attack_surface_schema,
+        )
+        try:
+            schema = json.loads(schema_text)
+        except json.JSONDecodeError as exc:
+            raise AuditWorkflowError(f"invalid attack-surface inventory schema: {exc}") from exc
+        definitions = schema.get("$defs") if isinstance(schema, dict) else None
+        if not isinstance(definitions, dict) or not {
+            "protocol_record",
+            "message_record",
+        }.issubset(definitions):
+            raise AuditWorkflowError(
+                "attack-surface inventory schema must define protocol_record "
+                "and message_record"
+            )
+        normalized = json.dumps(schema, ensure_ascii=False, indent=2) + "\n"
+        if (
+            not self.inventory_schema_path.is_file()
+            or self.inventory_schema_path.read_text(encoding="utf-8") != normalized
+        ):
+            _atomic_write_text(self.inventory_schema_path, normalized)
+        return _hash_text(normalized)
+
+    def _project_prompt_path(self, path: Path) -> str:
+        relative = path.relative_to(Path(self.config.project_dir))
+        return f"./{relative.as_posix()}"
 
     def _message_specs(self, surface: _SurfaceInventory) -> list[_TaskSpec]:
         template = Template(

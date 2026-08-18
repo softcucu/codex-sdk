@@ -264,6 +264,8 @@ except GoalResumeExhaustedError as exc:
 
 如果攻击面分析此前已经由其他方式完成，可在已有 `protocol_inventory.jsonl`、`message_inventory.jsonl` 等产物旁创建一个空的 `ATTACK_SURFACE_COMPLETE.json`。工作流看到该文件后会直接跳过耗时的第一阶段；该文件内容和哈希不参与判断。后续任务仍需要现有 inventory 能够正常解析。
 
+工作流会在第一阶段开始前将固定 JSON Schema 复制为 `protocol-analysis/inventory_schema.json`。攻击面 Goal 从该文件读取 `protocol_record` 和 `message_record` 的严格字段契约，避免把大段 schema 放进受 4000 字符限制的 Goal objective。
+
 ```bash
 codex-vuln-audit \
   -C /path/to/target-repository \
