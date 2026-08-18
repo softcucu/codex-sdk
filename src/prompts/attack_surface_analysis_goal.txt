@@ -1,0 +1,215 @@
+/goal 分析当前代码仓，建立一份**完整、可验证、可复用的协议与消息处理面清单**，供后续协议分析、代码分析和漏洞挖掘使用。本任务只做协议面、消息面、入口、可达性和外部可控性建模，**不要进行漏洞挖掘**。
+
+## 目标
+
+识别并证明：
+
+1. 代码仓实际实现或处理了哪些协议；
+2. 每个协议通过什么接口进入或离开系统；
+3. 实际处理哪些 RX/TX 消息；
+4. 重要 RX 消息从输入边界到最终 handler 的真实代码路径；
+5. 消息需要满足哪些状态、会话或安全上下文；
+6. 消息属于直接外部输入、间接外部输入、内部边界还是纯内部消息；
+7. 哪些字段能被系统外部实体直接或间接控制；
+8. 哪些代码区域已检查，哪些仍可能遗漏。
+
+所有重要结论必须有代码证据。不得仅根据 README、目录名、注释、enum、测试代码或 generated code 判断协议实际支持。
+
+## Agent 策略
+
+合理使用子 Agent，避免单个上下文过长导致分析变浅。遵循：
+
+> 一个 Agent 只负责一个明确 outcome。
+
+Main Agent 只负责拆分、合并、去重、覆盖检查和最终汇总。
+
+执行阶段：
+
+1. **Discovery**：按互不重叠的模块扫描代码仓，只识别候选协议、外部接口、IPC/RPC、schema/ASN.1/IDL/protobuf、codec、dispatcher 和实现模块，不深入全部消息。
+2. **Protocol Agent**：每个主要协议独立分析，目标是完整建立该协议的消息清单和处理路径。协议过大时按 RX/TX、channel、message family 或 subsystem 继续拆分。
+3. **Blind-Spot Agent**：独立检查遗漏的 transport、socket、IPC/RPC、queue、shared memory、generated protocol code、vendor interface、callback、custom parser/TLV 等。
+4. **Validation Agent**：独立检查错误分类、遗漏 dispatch case、test-only 实现、不可达 handler、generated definition 被误认为实际支持等问题。
+
+子 Agent 的详细结果写文件，只向 Main Agent 返回摘要和结果路径。
+
+## 消息实现状态
+
+每个消息至少区分：
+
+- `DEFINED`：存在协议/schema/message 定义；
+- `DECODED`：生产代码可解析；
+- `DISPATCHED`：生产代码存在分发逻辑；
+- `HANDLED`：存在具体业务 handler。
+
+不得因为存在定义、decoder 或 handler 就认定消息真实可达。
+
+## 暴露等级
+
+每个消息必须标记：
+
+- `E0_DIRECT_EXTERNAL`：系统外部实体可直接发送，如 UE 空口消息、外部 TCP/UDP/SCTP、外部网元或 API；
+- `E1_INDIRECT_EXTERNAL`：当前模块收到 IPC/内部消息，但可通过代码证明数据来源于系统外部输入；
+- `E2_INTERNAL_BOUNDARY`：跨模块/进程输入，但没有证据表明系统外部实体可控制；
+- `E3_TRUSTED_LOCAL`：需要本地可信或特权实体控制；
+- `E4_INTERNAL_ONLY`：纯内部消息。
+
+不要把 IPC 可达误认为远程攻击者可达。
+
+同时记录：
+
+```text
+boundary_reachable
+direct_external_reachable
+indirect_external_reachable
+```
+
+对于 `E1`，必须尽量建立：
+
+```text
+external source
+→ upstream decoder/handler
+→ internal event/IPC
+→ target handler
+```
+
+没有充分证据时保持 `E2`，不要自行升级为 `E1`。
+
+## 外部控制能力
+
+重要消息记录：
+
+```text
+direct_message_control
+indirect_message_control
+field_level_control = NONE|PARTIAL|SUBSTANTIAL|FULL|UNKNOWN
+externally_controllable_fields
+```
+
+不要因为 IPC 由外部输入间接触发，就认为 IPC 中所有字段均由攻击者控制。必须区分外部字段、上游校验/归一化字段和内部生成字段。
+
+## RX 路径与前置条件
+
+重要 RX 消息尽量建立：
+
+```text
+Source
+→ Boundary/Transport
+→ Parser/Decoder
+→ Validation
+→ Dispatcher
+→ Handler
+```
+
+按真实实现记录，不强行套模板。
+
+同时记录：
+
+```text
+state_preconditions
+session_preconditions
+security_context_preconditions
+```
+
+每类必须区分：
+
+```text
+confirmed
+inferred
+unknown
+```
+
+禁止把协议经验或推测写成事实。
+
+## 证据要求
+
+重要结论至少记录：
+
+```text
+file
+symbol
+line/line-range
+evidence_type
+description
+```
+
+证据类型包括但不限于：
+
+```text
+protocol_definition
+transport_receive
+parser
+decoder
+validator
+dispatcher
+handler
+encoder
+sender
+state_machine
+production_callsite
+```
+
+## 输出
+
+所有结果写入：
+
+```text
+./protocol-analysis/
+```
+
+至少生成：
+
+```text
+PROTOCOL_SURFACE.md
+protocol_inventory.jsonl
+message_inventory.jsonl
+coverage.md
+protocols/<protocol-id>/summary.md
+protocols/<protocol-id>/messages.jsonl
+```
+
+`message_inventory.jsonl` 每条消息至少包含：
+
+```text
+protocol/message
+direction
+exposure_class
+boundary/source
+DEFINED/DECODED/DISPATCHED/HANDLED
+direct/indirect reachability
+attacker controllability
+entrypoint/decoder/validator/dispatcher/handler
+externally controllable fields
+external source chain
+state/session/security preconditions
+confidence
+evidence
+unresolved questions
+```
+
+`PROTOCOL_SURFACE.md` 必须分别展示：
+
+1. `E0` Direct External Surface；
+2. `E1` Indirect External Surface；
+3. `E2` Internal Boundary Surface；
+4. `E3` Trusted Local Surface；
+5. 协议关系、状态模型、Coverage 与 Blind Spots。
+
+## 完成门槛
+
+不要因以下原因提前结束：找到几个明显协议目录、ASN.1/schema、enum、decoder、handler，grep 无新结果，context 过长或发生 compaction。
+
+结束前必须确认：
+
+1. production code 顶层区域是否全部被覆盖或明确排除；
+2. receive/send/interface 是否都关联到协议；
+3. dispatch case 是否遗漏；
+4. RX handler 是否尽量追溯到真实输入来源；
+5. E0/E1/E2 分类是否有代码证据；
+6. E1 是否有外部来源链；
+7. 外部可控字段是否与内部字段区分；
+8. 大型协议是否因上下文过长而只做表面分析；
+9. 是否完成 Blind-Spot 和独立 Validation。
+
+存在实质性缺口时继续创建范围明确的子 Agent，不要结束 Goal。
+
+最终结果必须能够作为后续**协议分析 → 可达性分析 → 字段可控性分析 → 状态机分析 → handler 分析 → 漏洞挖掘**的可靠输入。
