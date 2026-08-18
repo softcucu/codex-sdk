@@ -287,6 +287,32 @@ def test_empty_manual_attack_surface_marker_skips_expensive_first_stage(
     ]
 
 
+def test_existing_inventory_with_msg_type_name_is_backward_compatible(
+    tmp_path: Path,
+) -> None:
+    fake = WorkflowFakeController(cwd=str(tmp_path))
+    fake._write_surface()
+    root = tmp_path / "protocol-analysis"
+    (root / "message_inventory.jsonl").write_text(
+        json.dumps(
+            {
+                "protocol_id": "demo",
+                "msg_type_name": "HelloMessage",
+                "direction": "RX",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (root / "ATTACK_SURFACE_COMPLETE.json").touch()
+
+    result = workflow(tmp_path).run()
+
+    assert result.status is AuditWorkflowStatus.COMPLETE
+    assert "attack-surface" not in WorkflowFakeController.goal_calls
+    assert "message--demo--rx--hellomessage" in WorkflowFakeController.goal_calls
+
+
 def test_interrupted_goal_is_resumed_from_persisted_thread(tmp_path: Path) -> None:
     task_id = "message--demo--rx--hello"
     WorkflowFakeController.interrupt_once.add(task_id)

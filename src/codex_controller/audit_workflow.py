@@ -1468,8 +1468,28 @@ def _normalize_messages(
         message_value = raw.get("message")
         combined = raw.get("protocol/message")
         protocol_text = _first_text(raw, "protocol_id", "protocolId")
-        message_id = _first_text(raw, "message_id", "messageId", "id")
-        message_name = _first_text(raw, "message_name", "messageName", "name")
+        message_id = _first_text(
+            raw,
+            "message_id",
+            "messageId",
+            "msg_type_id",
+            "msgTypeId",
+            "message_type_id",
+            "messageTypeId",
+            "msg_id",
+            "id",
+        )
+        message_name = _first_text(
+            raw,
+            "message_name",
+            "messageName",
+            "msg_type_name",
+            "msgTypeName",
+            "message_type_name",
+            "messageTypeName",
+            "msg_name",
+            "name",
+        )
         if isinstance(protocol_value, dict):
             protocol_text = protocol_text or _first_text(
                 protocol_value, "protocol_id", "protocolId", "id", "name"
@@ -1478,10 +1498,26 @@ def _normalize_messages(
             protocol_text = protocol_text or protocol_value.strip()
         if isinstance(message_value, dict):
             message_id = message_id or _first_text(
-                message_value, "message_id", "messageId", "id"
+                message_value,
+                "message_id",
+                "messageId",
+                "msg_type_id",
+                "msgTypeId",
+                "message_type_id",
+                "messageTypeId",
+                "msg_id",
+                "id",
             )
             message_name = message_name or _first_text(
-                message_value, "message_name", "messageName", "name"
+                message_value,
+                "message_name",
+                "messageName",
+                "msg_type_name",
+                "msgTypeName",
+                "message_type_name",
+                "messageTypeName",
+                "msg_name",
+                "name",
             )
         elif isinstance(message_value, str):
             message_name = message_name or message_value.strip()

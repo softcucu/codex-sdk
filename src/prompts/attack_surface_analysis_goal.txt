@@ -167,24 +167,176 @@ protocols/<protocol-id>/summary.md
 protocols/<protocol-id>/messages.jsonl
 ```
 
-`message_inventory.jsonl` 每条消息至少包含：
+### JSONL 通用规则
 
-```text
-protocol/message
-direction
-exposure_class
-boundary/source
-DEFINED/DECODED/DISPATCHED/HANDLED
-direct/indirect reachability
-attacker controllability
-entrypoint/decoder/validator/dispatcher/handler
-externally controllable fields
-external source chain
-state/session/security preconditions
-confidence
-evidence
-unresolved questions
+- `protocol_inventory.jsonl` 每行表示一个协议；`message_inventory.jsonl` 每行表示一个协议消息及方向。
+- 每条记录必须是单个 JSON object，并完整写在一行内。不得输出 JSON 数组、注释、Markdown fence、尾随逗号或跨行 JSON。
+- 下述字段全部必填，不得自行改名。未知枚举使用 `UNKNOWN`，无法确认的布尔值使用 `null`，未知字符串使用 `null`，没有内容的数组使用 `[]`。
+- `protocol_id` 和 `message_id` 必须是稳定的机器标识，只能包含 ASCII 字母、数字、点、下划线和连字符，不得包含 `/`、空白或路径片段。
+- `protocol_id` 在 `protocol_inventory.jsonl` 中必须唯一。`message_inventory.jsonl` 中 `(protocol_id, message_id, direction)` 组合必须唯一。
+- 每条消息的 `protocol_id` 必须引用 `protocol_inventory.jsonl` 中已有的协议。
+- `protocols/<protocol-id>/messages.jsonl` 必须使用与全局 `message_inventory.jsonl` 完全相同的消息格式，只包含对应协议的记录。
+- 下面为了说明结构使用缩进 JSON；写入 JSONL 文件时必须压缩为一行。
+
+### `protocol_inventory.jsonl` 格式
+
+每个协议严格使用以下结构：
+
+```json
+{
+  "schema_version": "1.0",
+  "protocol_id": "稳定且唯一的协议 ID",
+  "protocol_name": "协议显示名称",
+  "description": "生产代码中该协议用途的简要说明",
+  "roles": ["协议通信角色"],
+  "transports": ["TCP/UDP/SCTP/IPC/SHM/custom 等实际 transport"],
+  "boundaries": [
+    {
+      "name": "边界名称",
+      "type": "REMOTE",
+      "transport": "transport 名称或 null",
+      "source": "输入来源或 null",
+      "destination": "目标模块或 null",
+      "direction": "RX"
+    }
+  ],
+  "rx_entrypoints": [
+    {
+      "file": "仓库相对路径",
+      "symbol": "代码符号",
+      "line": "行号或范围；无法确认时为 null",
+      "description": "入口说明"
+    }
+  ],
+  "tx_entrypoints": [
+    {
+      "file": "仓库相对路径",
+      "symbol": "代码符号",
+      "line": "行号或范围；无法确认时为 null",
+      "description": "出口说明"
+    }
+  ],
+  "exposure_classes": ["E0_DIRECT_EXTERNAL"],
+  "implementation_status": "IMPLEMENTED",
+  "message_counts": {
+    "rx": 0,
+    "tx": 0,
+    "bidirectional": 0,
+    "internal": 0,
+    "total": 0
+  },
+  "evidence": [
+    {
+      "file": "仓库相对路径",
+      "symbol": "代码符号",
+      "line": "行号或范围；无法确认时为 null",
+      "evidence_type": "production_callsite",
+      "description": "该证据证明的内容"
+    }
+  ],
+  "unresolved_questions": ["仍未解决的问题"]
+}
 ```
+
+### `message_inventory.jsonl` 格式
+
+每条消息严格使用以下结构：
+
+```json
+{
+  "schema_version": "1.0",
+  "protocol_id": "必须引用 protocol_inventory.jsonl 中的 protocol_id",
+  "message_id": "协议内稳定的消息 ID",
+  "message_name": "消息显示名称或代码中的正式名称",
+  "direction": "RX",
+  "exposure_class": "E0_DIRECT_EXTERNAL",
+  "boundary": {
+    "name": "消息经过的边界名称或 null",
+    "type": "REMOTE",
+    "transport": "transport 名称或 null",
+    "source": "消息来源或 null",
+    "destination": "目标模块或 null"
+  },
+  "implementation_status": ["DEFINED", "DECODED", "DISPATCHED", "HANDLED"],
+  "reachability": {
+    "boundary_reachable": true,
+    "direct_external_reachable": false,
+    "indirect_external_reachable": false
+  },
+  "controllability": {
+    "direct_message_control": false,
+    "indirect_message_control": false,
+    "field_level_control": "PARTIAL",
+    "externally_controllable_fields": ["字段名及其约束"],
+    "internally_generated_fields": ["内部生成或外部不可控字段"]
+  },
+  "processing": {
+    "entrypoint": {
+      "file": "仓库相对路径",
+      "symbol": "代码符号",
+      "line": "行号或范围；无法确认时为 null"
+    },
+    "decoder": {
+      "file": "仓库相对路径",
+      "symbol": "代码符号",
+      "line": "行号或范围；无法确认时为 null"
+    },
+    "validator": {
+      "file": "仓库相对路径",
+      "symbol": "代码符号",
+      "line": "行号或范围；无法确认时为 null"
+    },
+    "dispatcher": {
+      "file": "仓库相对路径",
+      "symbol": "代码符号",
+      "line": "行号或范围；无法确认时为 null"
+    },
+    "handler": {
+      "file": "仓库相对路径",
+      "symbol": "代码符号",
+      "line": "行号或范围；无法确认时为 null"
+    }
+  },
+  "external_source_chain": ["按顺序记录外部来源到目标 handler 的路径"],
+  "preconditions": {
+    "state": {
+      "confidence": "confirmed",
+      "conditions": ["状态前置条件"]
+    },
+    "session": {
+      "confidence": "confirmed",
+      "conditions": ["会话前置条件"]
+    },
+    "security_context": {
+      "confidence": "confirmed",
+      "conditions": ["身份、权限、加密或完整性前置条件"]
+    }
+  },
+  "confidence": "confirmed",
+  "evidence": [
+    {
+      "file": "仓库相对路径",
+      "symbol": "代码符号",
+      "line": "行号或范围；无法确认时为 null",
+      "evidence_type": "handler",
+      "description": "该证据证明的内容"
+    }
+  ],
+  "unresolved_questions": ["仍未解决的问题"]
+}
+```
+
+枚举字段只能使用以下值：
+
+- `direction`：`RX`、`TX`、`BIDIRECTIONAL`、`INTERNAL`、`UNKNOWN`；
+- boundary `type`：`REMOTE`、`IPC`、`LOCAL`、`INTERNAL`、`UNKNOWN`；
+- `exposure_class`：`E0_DIRECT_EXTERNAL`、`E1_INDIRECT_EXTERNAL`、`E2_INTERNAL_BOUNDARY`、`E3_TRUSTED_LOCAL`、`E4_INTERNAL_ONLY`、`UNKNOWN`；
+- `implementation_status` 数组元素：`DEFINED`、`DECODED`、`DISPATCHED`、`HANDLED`；
+- protocol `implementation_status`：`IMPLEMENTED`、`PARTIAL`、`DEFINED_ONLY`、`UNKNOWN`；
+- `field_level_control`：`NONE`、`PARTIAL`、`SUBSTANTIAL`、`FULL`、`UNKNOWN`；
+- confidence：`confirmed`、`inferred`、`unknown`。
+
+如果某个 `processing` 节点不存在或尚未找到，字段值必须写为 `null`，不得删除该 key。消息的 `implementation_status` 只列出有生产代码证据支持的状态，例如仅存在定义和 decoder 时写为 `["DEFINED", "DECODED"]`，不得自动补全为 `HANDLED`。
 
 `PROTOCOL_SURFACE.md` 必须分别展示：
 
