@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 from codex_controller import (
+    AuditOutputValidationError,
     AuditWorkflowConfig,
     AuditWorkflowStatus,
     VulnerabilityAuditWorkflow,
@@ -25,7 +26,6 @@ class WorkflowFakeController:
     terminal_failures: dict[str, int] = {}
     invalid_outputs: dict[str, int] = {}
     interrupt_once: set[str] = set()
-    vulnerable_tasks: set[str] = set()
 
     @classmethod
     def reset(cls) -> None:
@@ -36,7 +36,6 @@ class WorkflowFakeController:
         cls.terminal_failures = {}
         cls.invalid_outputs = {}
         cls.interrupt_once = set()
-        cls.vulnerable_tasks = set()
 
     def __init__(self, **kwargs: Any) -> None:
         self.cwd = Path(kwargs["cwd"])
@@ -120,113 +119,52 @@ class WorkflowFakeController:
 
     def _write_surface(self) -> None:
         root = self.cwd / "protocol-analysis"
-        (root / "protocols" / "demo").mkdir(parents=True, exist_ok=True)
-        (root / "PROTOCOL_SURFACE.md").write_text("# Demo protocol\n", encoding="utf-8")
-        (root / "coverage.md").write_text("# Coverage\n\nComplete.\n", encoding="utf-8")
-        (root / "protocol_inventory.jsonl").write_text(
-            json.dumps({"protocol_id": "demo", "protocol_name": "Demo"}) + "\n",
-            encoding="utf-8",
-        )
-        (root / "message_inventory.jsonl").write_text(
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "high_risk_modules.json").write_text(
             json.dumps(
-                {
-                    "protocol_id": "demo",
-                    "message_id": "hello",
-                    "message_name": "Hello",
-                    "direction": "RX",
-                }
-            )
-            + "\n",
+                [
+                    {
+                        "name": "Demo",
+                        "is_high_risk": True,
+                        "code_dir": ".",
+                        "reason": "Handles attacker-controlled requests.",
+                    }
+                ]
+            ),
             encoding="utf-8",
-        )
-        (root / "protocols" / "demo" / "summary.md").write_text(
-            "# Demo\n", encoding="utf-8"
-        )
-        (root / "protocols" / "demo" / "messages.jsonl").write_text(
-            "{}\n", encoding="utf-8"
         )
 
     def _write_invalid(self, task_id: str) -> None:
         if task_id == "attack-surface":
             root = self.cwd / "protocol-analysis"
             root.mkdir(parents=True, exist_ok=True)
-            (root / "PROTOCOL_SURFACE.md").write_text("", encoding="utf-8")
+            (root / "high_risk_modules.json").write_text("[]", encoding="utf-8")
             return
         results = self.cwd / "protocol-analysis" / "vulnerability-analysis" / "results"
         results.mkdir(parents=True, exist_ok=True)
         (results / f"{task_id}.audit.json").write_text("{}\n", encoding="utf-8")
 
     def _write_audit(self, objective: str, task_id: str) -> None:
-        results = self.cwd / "protocol-analysis" / "vulnerability-analysis" / "results"
-        results.mkdir(parents=True, exist_ok=True)
-        protocol_id = self._json_field(objective, "protocol_id")
-        if task_id.startswith("message--"):
-            data = {
-                "task_id": task_id,
-                "protocol_id": protocol_id,
-                "message_id": self._json_field(objective, "message_id"),
-                "direction": self._json_field(objective, "direction"),
-                "verdict": "NO_CONFIRMED_VULNERABILITY",
-                "summary": "No confirmed issue.",
-                "reachability": "external -> parser -> handler",
-                "controllable_fields": ["payload"],
-                "preconditions": ["connected"],
-                "findings": [],
-                "coverage_gaps": [],
-            }
-            if task_id in type(self).vulnerable_tasks:
-                data["verdict"] = "VULNERABLE"
-                data["findings"] = [
-                    {
-                        "id": "DEMO-1",
-                        "title": "Demo vulnerability",
-                        "severity": "HIGH",
-                        "cwe": "CWE-20",
-                        "root_cause": "Missing validation",
-                        "attack_path": ["external input", "unsafe handler"],
-                        "impact": "process crash",
-                        "evidence": [
-                            {
-                                "file": "src/demo.c",
-                                "symbol": "handle_demo",
-                                "line": "10-20",
-                                "description": "unchecked input",
-                            }
-                        ],
-                        "remediation": "validate input",
-                    }
-                ]
-        else:
-            data = {
-                "task_id": task_id,
-                "protocol_id": protocol_id,
-                "verdict": "NO_CONFIRMED_VULNERABILITY",
-                "summary": "No confirmed protocol issue.",
-                "attack_surface": "external demo endpoint",
-                "protocol_model": ["hello request"],
-                "security_invariants": ["session binding"],
-                "findings": [],
-                "coverage_gaps": [],
-            }
-        (results / f"{task_id}.audit.json").write_text(
-            json.dumps(data), encoding="utf-8"
+        module_match = re.search(r"外部高风险模块 `([^`]+)`", objective)
+        report_match = re.search(r"只允许生成漏洞报告 `([^`]+)`", objective)
+        assert module_match is not None, objective
+        assert report_match is not None, objective
+        module_name = module_match.group(1)
+        report = Path(report_match.group(1))
+        report.parent.mkdir(parents=True, exist_ok=True)
+        report.write_text(
+            f"# {module_name} DoS\n",
+            encoding="utf-8",
         )
-        if task_id in type(self).vulnerable_tasks:
-            (results / f"{task_id}.漏洞报告.md").write_text(
-                "# Demo vulnerability\n", encoding="utf-8"
-            )
-
-    @staticmethod
-    def _json_field(objective: str, name: str) -> str:
-        match = re.search(rf'"{re.escape(name)}": "([^"]+)"', objective)
-        assert match is not None, (name, objective)
-        return match.group(1)
 
     @staticmethod
     def _task_id(objective: str) -> str:
-        if '"task_id"' not in objective and "protocol_inventory.jsonl" in objective:
+        if "high_risk_modules.json" in objective:
             return "attack-surface"
-        return WorkflowFakeController._json_field(objective, "task_id")
+        match = re.search(r"外部高风险模块 `([^`]+)`", objective)
+        assert match is not None, objective
+        slug = re.sub(r"[^a-z0-9]+", "-", match.group(1).lower()).strip("-")
+        return f"module--{slug or 'item'}"
 
 
 @pytest.fixture(autouse=True)
@@ -253,19 +191,24 @@ def test_workflow_completes_with_flat_uniquely_named_results_and_reuses_them(
     first = workflow(tmp_path).run()
 
     assert first.status is AuditWorkflowStatus.COMPLETE
-    assert first.message_completed == 1
+    assert first.message_completed == 0
     assert first.protocol_completed == 1
     results = first.results_dir
-    assert (results / "message--demo--rx--hello.audit.json").is_file()
-    assert (results / "message--demo--rx--hello.complete.json").is_file()
-    assert (results / "protocol--demo.audit.json").is_file()
-    assert (results / "protocol--demo.complete.json").is_file()
-    assert len(WorkflowFakeController.goal_calls) == 3
+    assert (results / "Demo-DoS-001.md").is_file()
+    assert list(results.glob("*.json")) == []
+    assert (
+        tmp_path
+        / "protocol-analysis"
+        / ".workflow"
+        / "completions"
+        / "module--demo.complete.json"
+    ).is_file()
+    assert len(WorkflowFakeController.goal_calls) == 2
 
     second = workflow(tmp_path).run()
 
     assert second.status is AuditWorkflowStatus.COMPLETE
-    assert len(WorkflowFakeController.goal_calls) == 3
+    assert len(WorkflowFakeController.goal_calls) == 2
     assert WorkflowFakeController.resume_calls == []
 
 
@@ -284,8 +227,9 @@ def test_attack_surface_schema_is_installed_before_bounded_goal_is_created(
             encoding="utf-8"
         )
     )
-    assert "protocol_record" in schema["$defs"]
-    assert "message_record" in schema["$defs"]
+    assert "module_record" in schema["$defs"]
+    assert "high_risk_modules.json" in spec.objective
+    assert "只能包含以下四个字段" in spec.objective
 
 
 def test_empty_manual_attack_surface_marker_skips_expensive_first_stage(
@@ -300,27 +244,47 @@ def test_empty_manual_attack_surface_marker_skips_expensive_first_stage(
 
     assert result.status is AuditWorkflowStatus.COMPLETE
     assert "attack-surface" not in WorkflowFakeController.goal_calls
-    assert WorkflowFakeController.goal_calls == [
-        "message--demo--rx--hello",
-        "protocol--demo",
-    ]
+    assert WorkflowFakeController.goal_calls == ["module--demo"]
 
 
-def test_existing_inventory_with_msg_type_name_is_backward_compatible(
+def test_module_dos_prompt_is_assembled_from_high_risk_module(tmp_path: Path) -> None:
+    fake = WorkflowFakeController(cwd=str(tmp_path))
+    fake._write_surface()
+    active = workflow(tmp_path)
+
+    spec = active._module_specs(active._validate_surface())[0]
+
+    assert "外部高风险模块 `Demo`" in spec.objective
+    assert "DoS漏洞" in spec.objective
+    assert "可通过外部消息触发" in spec.objective
+    assert "Demo-DoS-001.md" in spec.objective
+
+
+def test_non_high_risk_modules_are_validated_but_not_scheduled(
     tmp_path: Path,
 ) -> None:
     fake = WorkflowFakeController(cwd=str(tmp_path))
     fake._write_surface()
     root = tmp_path / "protocol-analysis"
-    (root / "message_inventory.jsonl").write_text(
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (root / "high_risk_modules.json").write_text(
         json.dumps(
-            {
-                "protocol_id": "demo",
-                "msg_type_name": "HelloMessage",
-                "direction": "RX",
-            }
-        )
-        + "\n",
+            [
+                {
+                    "name": "Demo",
+                    "is_high_risk": True,
+                    "code_dir": ".",
+                    "reason": "Handles attacker-controlled requests.",
+                },
+                {
+                    "name": "Documentation",
+                    "is_high_risk": False,
+                    "code_dir": "docs",
+                    "reason": None,
+                },
+            ]
+        ),
         encoding="utf-8",
     )
     (root / "ATTACK_SURFACE_COMPLETE.json").touch()
@@ -329,11 +293,77 @@ def test_existing_inventory_with_msg_type_name_is_backward_compatible(
 
     assert result.status is AuditWorkflowStatus.COMPLETE
     assert "attack-surface" not in WorkflowFakeController.goal_calls
-    assert "message--demo--rx--hellomessage" in WorkflowFakeController.goal_calls
+    assert WorkflowFakeController.goal_calls == ["module--demo"]
+
+
+@pytest.mark.parametrize(
+    ("record", "error"),
+    [
+        (
+            {
+                "name": "Demo",
+                "is_high_risk": "true",
+                "code_dir": ".",
+                "reason": "External input.",
+            },
+            "is_high_risk must be a JSON boolean",
+        ),
+        (
+            {
+                "name": "Demo",
+                "is_high_risk": True,
+                "code_dir": ".",
+                "reason": None,
+            },
+            "requires a non-empty reason",
+        ),
+        (
+            {
+                "name": "Demo",
+                "is_high_risk": False,
+                "code_dir": ".",
+                "reason": "Not exposed.",
+            },
+            "must use null for reason",
+        ),
+        (
+            {
+                "name": "Demo",
+                "is_high_risk": False,
+                "code_dir": "../outside",
+                "reason": None,
+            },
+            "normalized repository-relative directory",
+        ),
+        (
+            {
+                "name": "Demo",
+                "is_high_risk": False,
+                "code_dir": ".",
+                "reason": None,
+                "extra": "not allowed",
+            },
+            "fields must be exactly",
+        ),
+    ],
+)
+def test_high_risk_module_json_contract_is_strict(
+    tmp_path: Path,
+    record: dict[str, Any],
+    error: str,
+) -> None:
+    active = workflow(tmp_path)
+    active.output_dir.mkdir(parents=True)
+    (active.output_dir / "high_risk_modules.json").write_text(
+        json.dumps([record]), encoding="utf-8"
+    )
+
+    with pytest.raises(AuditOutputValidationError, match=error):
+        active._validate_surface()
 
 
 def test_interrupted_goal_is_resumed_from_persisted_thread(tmp_path: Path) -> None:
-    task_id = "message--demo--rx--hello"
+    task_id = "module--demo"
     WorkflowFakeController.interrupt_once.add(task_id)
 
     with pytest.raises(KeyboardInterrupt):
@@ -355,22 +385,24 @@ def test_interrupted_goal_is_resumed_from_persisted_thread(tmp_path: Path) -> No
 
 
 def test_terminal_failure_retries_then_records_partial_coverage(tmp_path: Path) -> None:
-    task_id = "message--demo--rx--hello"
+    task_id = "module--demo"
     WorkflowFakeController.terminal_failures[task_id] = 3
 
     result = workflow(tmp_path, max_workers=1, task_retries=2).run()
 
     assert result.status is AuditWorkflowStatus.PARTIAL
     assert result.exit_code == 2
-    assert result.message_failed == 1
-    assert result.protocol_completed == 1
+    assert result.message_failed == 0
+    assert result.protocol_failed == 1
     assert WorkflowFakeController.goal_calls.count(task_id) == 3
-    failure_audit = json.loads(
-        (result.results_dir / f"{task_id}.audit.json").read_text(encoding="utf-8")
-    )
-    assert failure_audit["execution_status"] == "failed"
-    assert failure_audit["verdict"] == "INCONCLUSIVE"
-    assert not (result.results_dir / f"{task_id}.complete.json").exists()
+    assert list(result.results_dir.iterdir()) == []
+    assert not (
+        tmp_path
+        / "protocol-analysis"
+        / ".workflow"
+        / "completions"
+        / f"{task_id}.complete.json"
+    ).exists()
     assert task_id in (
         tmp_path
         / "protocol-analysis"
@@ -378,25 +410,14 @@ def test_terminal_failure_retries_then_records_partial_coverage(tmp_path: Path) 
         / "coverage.md"
     ).read_text(encoding="utf-8")
 
-    archived_before = list(
-        (tmp_path / "protocol-analysis" / ".workflow" / "failed-artifacts").rglob(
-            f"{task_id}.audit.json"
-        )
-    )
     calls_before = list(WorkflowFakeController.goal_calls)
     resumed = workflow(tmp_path, max_workers=1, task_retries=2).run()
-    archived_after = list(
-        (tmp_path / "protocol-analysis" / ".workflow" / "failed-artifacts").rglob(
-            f"{task_id}.audit.json"
-        )
-    )
     assert resumed.status is AuditWorkflowStatus.PARTIAL
     assert WorkflowFakeController.goal_calls == calls_before
-    assert archived_after == archived_before
 
 
 def test_completed_goal_with_invalid_output_uses_a_fresh_attempt(tmp_path: Path) -> None:
-    task_id = "message--demo--rx--hello"
+    task_id = "module--demo"
     WorkflowFakeController.invalid_outputs[task_id] = 1
 
     result = workflow(tmp_path, max_workers=1).run()
@@ -471,31 +492,37 @@ def test_target_source_changes_do_not_invalidate_completed_tasks(tmp_path: Path)
     assert WorkflowFakeController.goal_calls == calls
 
 
-def test_confirmed_finding_requires_and_indexes_task_report(tmp_path: Path) -> None:
-    task_id = "message--demo--rx--hello"
-    WorkflowFakeController.vulnerable_tasks.add(task_id)
+def test_confirmed_dos_finding_is_counted_without_extra_report(tmp_path: Path) -> None:
+    task_id = "module--demo"
 
     result = workflow(tmp_path).run()
 
     assert result.status is AuditWorkflowStatus.COMPLETE
     assert result.confirmed_findings == 1
-    assert (result.results_dir / f"{task_id}.漏洞报告.md").is_file()
+    report = result.results_dir / "Demo-DoS-001.md"
+    assert report.is_file()
     marker = json.loads(
-        (result.results_dir / f"{task_id}.complete.json").read_text(encoding="utf-8")
+        (
+            tmp_path
+            / "protocol-analysis"
+            / ".workflow"
+            / "completions"
+            / f"{task_id}.complete.json"
+        ).read_text(encoding="utf-8")
     )
     assert marker["findings_count"] == 1
-    assert f"{task_id}.漏洞报告.md" in marker["output_hashes"]
+    assert set(marker["output_hashes"]) == {"Demo-DoS-001.md"}
 
 
 def test_force_starts_new_generation_and_reruns_all_tasks(tmp_path: Path) -> None:
     first = workflow(tmp_path).run()
     assert first.status is AuditWorkflowStatus.COMPLETE
-    assert len(WorkflowFakeController.goal_calls) == 3
+    assert len(WorkflowFakeController.goal_calls) == 2
 
     second = workflow(tmp_path).run(force=True)
 
     assert second.status is AuditWorkflowStatus.COMPLETE
-    assert len(WorkflowFakeController.goal_calls) == 6
+    assert len(WorkflowFakeController.goal_calls) == 4
     state = json.loads(
         (tmp_path / "protocol-analysis" / ".workflow" / "state.json").read_text(
             encoding="utf-8"

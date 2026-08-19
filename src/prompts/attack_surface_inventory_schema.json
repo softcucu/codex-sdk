@@ -1,247 +1,32 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://local.codex/inventory-schema.json",
-  "title": "Protocol attack-surface inventory record",
-  "oneOf": [
-    {"$ref": "#/$defs/protocol_record"},
-    {"$ref": "#/$defs/message_record"}
-  ],
+  "$id": "https://local.codex/high-risk-modules-schema.json",
+  "title": "High-risk module inventory",
+  "type": "array",
+  "minItems": 1,
+  "items": {"$ref": "#/$defs/module_record"},
   "$defs": {
-    "identifier": {
-      "type": "string",
-      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
-    },
-    "nullable_string": {
-      "type": ["string", "null"]
-    },
-    "confidence": {
-      "enum": ["confirmed", "inferred", "unknown"]
-    },
-    "direction": {
-      "enum": ["RX", "TX", "BIDIRECTIONAL", "INTERNAL", "UNKNOWN"]
-    },
-    "boundary_type": {
-      "enum": ["REMOTE", "IPC", "LOCAL", "INTERNAL", "UNKNOWN"]
-    },
-    "exposure_class": {
-      "enum": [
-        "E0_DIRECT_EXTERNAL",
-        "E1_INDIRECT_EXTERNAL",
-        "E2_INTERNAL_BOUNDARY",
-        "E3_TRUSTED_LOCAL",
-        "E4_INTERNAL_ONLY",
-        "UNKNOWN"
-      ]
-    },
-    "evidence_type": {
-      "enum": [
-        "protocol_definition",
-        "transport_receive",
-        "parser",
-        "decoder",
-        "validator",
-        "dispatcher",
-        "handler",
-        "encoder",
-        "sender",
-        "state_machine",
-        "production_callsite",
-        "other"
-      ]
-    },
-    "code_ref": {
+    "module_record": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["file", "symbol", "line", "description"],
+      "required": ["name", "is_high_risk", "code_dir", "reason"],
       "properties": {
-        "file": {"type": "string"},
-        "symbol": {"$ref": "#/$defs/nullable_string"},
-        "line": {"$ref": "#/$defs/nullable_string"},
-        "description": {"type": "string"}
-      }
-    },
-    "evidence": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["file", "symbol", "line", "evidence_type", "description"],
-      "properties": {
-        "file": {"type": "string"},
-        "symbol": {"$ref": "#/$defs/nullable_string"},
-        "line": {"$ref": "#/$defs/nullable_string"},
-        "evidence_type": {"$ref": "#/$defs/evidence_type"},
-        "description": {"type": "string"}
-      }
-    },
-    "boundary": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["name", "type", "transport", "source", "destination"],
-      "properties": {
-        "name": {"$ref": "#/$defs/nullable_string"},
-        "type": {"$ref": "#/$defs/boundary_type"},
-        "transport": {"$ref": "#/$defs/nullable_string"},
-        "source": {"$ref": "#/$defs/nullable_string"},
-        "destination": {"$ref": "#/$defs/nullable_string"},
-        "direction": {"$ref": "#/$defs/direction"}
-      }
-    },
-    "protocol_boundary": {
+        "name": {"type": "string", "minLength": 1, "pattern": "^\\S(?:.*\\S)?$"},
+        "is_high_risk": {"type": "boolean"},
+        "code_dir": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^(?:\\.|(?![A-Za-z]:)(?!\\./)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*\\\\)[^/]+(?:/[^/]+)*)$"
+        },
+        "reason": {"type": ["string", "null"]}
+      },
       "allOf": [
-        {"$ref": "#/$defs/boundary"},
         {
-          "type": "object",
-          "required": ["direction"],
-          "properties": {
-            "direction": {"$ref": "#/$defs/direction"}
-          }
+          "if": {"properties": {"is_high_risk": {"const": true}}},
+          "then": {"properties": {"reason": {"type": "string", "minLength": 1, "pattern": "^\\S(?:.*\\S)?$"}}},
+          "else": {"properties": {"reason": {"type": "null"}}}
         }
       ]
-    },
-    "precondition": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["confidence", "conditions"],
-      "properties": {
-        "confidence": {"$ref": "#/$defs/confidence"},
-        "conditions": {"type": "array", "items": {"type": "string"}}
-      }
-    },
-    "protocol_record": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "schema_version",
-        "protocol_id",
-        "protocol_name",
-        "description",
-        "roles",
-        "transports",
-        "boundaries",
-        "rx_entrypoints",
-        "tx_entrypoints",
-        "exposure_classes",
-        "implementation_status",
-        "message_counts",
-        "evidence",
-        "unresolved_questions"
-      ],
-      "properties": {
-        "schema_version": {"const": "1.0"},
-        "protocol_id": {"$ref": "#/$defs/identifier"},
-        "protocol_name": {"type": "string", "minLength": 1},
-        "description": {"type": "string"},
-        "roles": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
-        "transports": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
-        "boundaries": {"type": "array", "items": {"$ref": "#/$defs/protocol_boundary"}},
-        "rx_entrypoints": {"type": "array", "items": {"$ref": "#/$defs/code_ref"}},
-        "tx_entrypoints": {"type": "array", "items": {"$ref": "#/$defs/code_ref"}},
-        "exposure_classes": {"type": "array", "items": {"$ref": "#/$defs/exposure_class"}, "uniqueItems": true},
-        "implementation_status": {"enum": ["IMPLEMENTED", "PARTIAL", "DEFINED_ONLY", "UNKNOWN"]},
-        "message_counts": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["rx", "tx", "bidirectional", "internal", "total"],
-          "properties": {
-            "rx": {"type": "integer", "minimum": 0},
-            "tx": {"type": "integer", "minimum": 0},
-            "bidirectional": {"type": "integer", "minimum": 0},
-            "internal": {"type": "integer", "minimum": 0},
-            "total": {"type": "integer", "minimum": 0}
-          }
-        },
-        "evidence": {"type": "array", "items": {"$ref": "#/$defs/evidence"}},
-        "unresolved_questions": {"type": "array", "items": {"type": "string"}}
-      }
-    },
-    "message_record": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "schema_version",
-        "protocol_id",
-        "message_id",
-        "message_name",
-        "direction",
-        "exposure_class",
-        "boundary",
-        "implementation_status",
-        "reachability",
-        "controllability",
-        "processing",
-        "external_source_chain",
-        "preconditions",
-        "confidence",
-        "evidence",
-        "unresolved_questions"
-      ],
-      "properties": {
-        "schema_version": {"const": "1.0"},
-        "protocol_id": {"$ref": "#/$defs/identifier"},
-        "message_id": {"$ref": "#/$defs/identifier"},
-        "message_name": {"type": "string", "minLength": 1},
-        "direction": {"$ref": "#/$defs/direction"},
-        "exposure_class": {"$ref": "#/$defs/exposure_class"},
-        "boundary": {"$ref": "#/$defs/boundary"},
-        "implementation_status": {
-          "type": "array",
-          "items": {"enum": ["DEFINED", "DECODED", "DISPATCHED", "HANDLED"]},
-          "uniqueItems": true
-        },
-        "reachability": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["boundary_reachable", "direct_external_reachable", "indirect_external_reachable"],
-          "properties": {
-            "boundary_reachable": {"type": ["boolean", "null"]},
-            "direct_external_reachable": {"type": ["boolean", "null"]},
-            "indirect_external_reachable": {"type": ["boolean", "null"]}
-          }
-        },
-        "controllability": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "direct_message_control",
-            "indirect_message_control",
-            "field_level_control",
-            "externally_controllable_fields",
-            "internally_generated_fields"
-          ],
-          "properties": {
-            "direct_message_control": {"type": ["boolean", "null"]},
-            "indirect_message_control": {"type": ["boolean", "null"]},
-            "field_level_control": {"enum": ["NONE", "PARTIAL", "SUBSTANTIAL", "FULL", "UNKNOWN"]},
-            "externally_controllable_fields": {"type": "array", "items": {"type": "string"}},
-            "internally_generated_fields": {"type": "array", "items": {"type": "string"}}
-          }
-        },
-        "processing": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["entrypoint", "decoder", "validator", "dispatcher", "handler"],
-          "properties": {
-            "entrypoint": {"oneOf": [{"$ref": "#/$defs/code_ref"}, {"type": "null"}]},
-            "decoder": {"oneOf": [{"$ref": "#/$defs/code_ref"}, {"type": "null"}]},
-            "validator": {"oneOf": [{"$ref": "#/$defs/code_ref"}, {"type": "null"}]},
-            "dispatcher": {"oneOf": [{"$ref": "#/$defs/code_ref"}, {"type": "null"}]},
-            "handler": {"oneOf": [{"$ref": "#/$defs/code_ref"}, {"type": "null"}]}
-          }
-        },
-        "external_source_chain": {"type": "array", "items": {"type": "string"}},
-        "preconditions": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["state", "session", "security_context"],
-          "properties": {
-            "state": {"$ref": "#/$defs/precondition"},
-            "session": {"$ref": "#/$defs/precondition"},
-            "security_context": {"$ref": "#/$defs/precondition"}
-          }
-        },
-        "confidence": {"$ref": "#/$defs/confidence"},
-        "evidence": {"type": "array", "items": {"$ref": "#/$defs/evidence"}},
-        "unresolved_questions": {"type": "array", "items": {"type": "string"}}
-      }
     }
   }
 }

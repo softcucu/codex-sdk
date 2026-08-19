@@ -58,8 +58,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="codex-vuln-audit",
         description=(
-            "Run a durable attack-surface, per-message, and per-protocol "
-            "vulnerability-audit workflow."
+            "Run durable high-risk-module discovery and DoS vulnerability audits."
         ),
     )
     parser.add_argument(
@@ -77,7 +76,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model", help="default model for all workflow stages")
     parser.add_argument("--attack-surface-model", help="model for attack-surface analysis")
     parser.add_argument("--message-model", help="model for message audits")
-    parser.add_argument("--protocol-model", help="model for protocol audits")
+    parser.add_argument("--protocol-model", help="model for high-risk module DoS audits")
     parser.add_argument("--attack-surface-token-budget", type=_positive_int)
     parser.add_argument("--message-token-budget", type=_positive_int)
     parser.add_argument("--protocol-token-budget", type=_positive_int)
@@ -85,7 +84,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-workers",
         type=_positive_int,
         default=4,
-        help="maximum concurrent message/protocol Goals (default: 4)",
+        help="maximum concurrent high-risk module Goals (default: 4)",
     )
     parser.add_argument(
         "--task-retries",
@@ -160,8 +159,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     print(
         f"audit workflow {result.status.value}: "
-        f"{result.message_completed}/{result.message_total} messages, "
-        f"{result.protocol_completed}/{result.protocol_total} protocols, "
+        f"{result.high_risk_module_completed}/"
+        f"{result.high_risk_module_total} high-risk modules, "
         f"{result.confirmed_findings} confirmed findings; "
         f"results: {result.results_dir}"
     )

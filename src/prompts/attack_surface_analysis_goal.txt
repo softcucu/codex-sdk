@@ -1,89 +1,48 @@
-/goal 分析当前代码仓，建立一份**完整、可验证、可复用的协议与消息处理面清单**，供后续协议分析、代码分析和漏洞挖掘使用。本任务只做协议面、消息面、入口、可达性和外部可控性建模，**不要进行漏洞挖掘**。
+/goal 梳理当前代码仓中的外部高风险模块。高风险模块必须在生产代码中处理来自系统外部、且攻击者可直接或间接控制的消息，攻击者能够通过该消息处理入口对模块发起攻击。
 
-## 目标
+## 判定要求
 
-识别并证明：
+1. 必须从生产代码确认模块是否接收并处理外部消息，不得只根据目录名、README、注释、测试或接口定义判断。
+2. `is_high_risk=true` 必须同时满足：模块存在外部消息处理入口；消息可由攻击者直接或间接控制；消息能够到达该模块的生产处理代码。
+3. 仅发送消息、仅处理内部可信数据、仅包含消息定义，或没有外部可达处理路径的模块，必须标为非高风险。
+4. 高风险模块的 `reason` 应简要写明外部消息来源、处理入口和攻击者可达性。
 
-1. 代码仓实际实现或处理了哪些协议；
-2. 每个协议通过什么接口进入或离开系统；
-3. 实际处理哪些 RX/TX 消息；
-4. 重要 RX 消息从输入边界到最终 handler 的真实代码路径；
-5. 消息需要满足哪些状态、会话或安全上下文；
-6. 消息属于直接外部输入、间接外部输入、内部边界还是纯内部消息；
-7. 哪些字段能被系统外部实体直接或间接控制；
-8. 哪些代码区域已检查，哪些仍可能遗漏。
+## 输出文件目录约束
 
-所有重要结论必须有代码证据。不得仅根据 README、目录名、注释、enum、测试代码或 generated code 判断协议实际支持。
+- 只允许创建或修改 `${output_dir}/high_risk_modules.json`，不得修改仓库源码、配置、测试或其他分析结果。
+- `${output_dir}` 已由外部工作流创建；不要在其他目录写临时结果。
+- `code_dir` 是相对于代码仓根目录的目录路径，不是相对于 `${output_dir}` 的路径。
 
-## Agent 策略
+## JSON 约束
 
-合理使用子 Agent，一个 Agent 只负责一个明确 outcome。Main Agent 负责拆分、合并、去重、覆盖检查和最终汇总。
+写入前读取 `${inventory_schema_path}`。`high_risk_modules.json` 必须是 UTF-8 编码的合法 JSON，顶层必须是数组；不得使用 JSONL、Markdown fence、注释或尾随逗号。数组每个元素代表一个模块，并且只能包含以下四个字段：
 
-1. **Discovery**：按模块扫描候选协议、外部接口、IPC/RPC、schema/ASN.1/IDL/protobuf、codec 和 dispatcher。
-2. **Protocol Agent**：每个主要协议独立建立消息清单和处理路径；协议过大时按 RX/TX、channel、message family 或 subsystem 拆分。
-3. **Blind-Spot Agent**：检查遗漏的 transport、socket、IPC/RPC、queue、shared memory、generated protocol code、vendor interface、callback、custom parser/TLV。
-4. **Validation Agent**：检查错误分类、遗漏 dispatch case、test-only 实现、不可达 handler、generated definition 被误认为实际支持等问题。
-
-子 Agent 详细结果写文件，只向 Main Agent 返回摘要和结果路径。
-
-所有工具调用必须通过原生工具接口提交符合工具 schema 的完整 JSON 参数（使用双引号，禁止截断或用 Python 字面量代替 JSON）。若工具返回 `invalid JSON`、`Unterminated string` 或 tool arguments 解析错误，先修正参数并重试；这类可恢复错误不是需要用户输入的阻塞条件，不得因此把 Goal 标记为 `blocked`。
-
-## 分类规则
-
-消息实现状态：`DEFINED`（存在定义）、`DECODED`（生产代码可解析）、`DISPATCHED`（存在生产分发）、`HANDLED`（存在业务 handler）。不得因存在定义、decoder 或孤立 handler 就认定真实可达。
-
-暴露等级：
-
-- `E0_DIRECT_EXTERNAL`：外部实体可直接发送；
-- `E1_INDIRECT_EXTERNAL`：有代码证明数据来自外部输入；
-- `E2_INTERNAL_BOUNDARY`：跨模块/进程但外部控制未证实；
-- `E3_TRUSTED_LOCAL`：需要可信或特权本地实体；
-- `E4_INTERNAL_ONLY`：纯内部消息。
-
-不要把 IPC 自动归为 E1。E1 尽量证明 `external source → upstream decoder/handler → IPC/event → target handler`，证据不足时保持 E2。
-
-重要消息记录直接/间接消息控制、`field_level_control=NONE|PARTIAL|SUBSTANTIAL|FULL|UNKNOWN`、外部可控字段和内部生成字段。不要把间接触发误认为所有字段均可控。
-
-重要 RX 消息尽量证明 `Source → Boundary/Transport → Parser/Decoder → Validation → Dispatcher → Handler`。状态、会话、安全上下文分别区分 `confirmed|inferred|unknown`，不得把协议经验写成事实。
-
-证据包含仓库相对 `file`、`symbol`、`line`、`evidence_type`、`description`；行号无法确认时使用 `null`，不得编造。
-
-## 输出
-
-所有结果写入 `${output_dir}/`，至少生成：
-
-```text
-PROTOCOL_SURFACE.md
-protocol_inventory.jsonl
-message_inventory.jsonl
-coverage.md
-protocols/<protocol-id>/summary.md
-protocols/<protocol-id>/messages.jsonl
+```json
+[
+  {
+    "name": "外部消息处理模块",
+    "is_high_risk": true,
+    "code_dir": "src/network",
+    "reason": "处理攻击者可控的网络请求，请求经解析入口进入该模块"
+  },
+  {
+    "name": "内部工具模块",
+    "is_high_risk": false,
+    "code_dir": "src/internal",
+    "reason": null
+  }
+]
 ```
 
-写 JSONL 前必须先读取 `${inventory_schema_path}`：
+字段规则：
 
-- `protocol_inventory.jsonl` 每行一个 JSON object，严格符合 schema 中的 `protocol_record` 定义；
-- `message_inventory.jsonl` 每行一个 JSON object，严格符合 schema 中的 `message_record` 定义；
-- `protocols/<protocol-id>/messages.jsonl` 使用相同 message schema，只包含对应协议；
-- 每条记录完整写在一行内，不得输出数组封装、注释、Markdown fence 或跨行 JSON；
-- schema 标记为 required 的 key 不得省略或改名；未知值按 schema 使用 `null`、`UNKNOWN` 或空数组；
-- `protocol_id` 唯一；`(protocol_id,message_id,direction)` 唯一；每条消息引用已存在的 protocol。
+- `name`：非空字符串，在数组中唯一。
+- `is_high_risk`：JSON 布尔值，只能是 `true` 或 `false`，不得写成字符串或数字。
+- `code_dir`：非空字符串，在数组中唯一；必须使用 `/` 分隔的规范仓库相对目录，仓库根目录写 `.`；不得使用绝对路径、`./` 前缀、`..`、反斜杠或指向文件的路径。
+- `reason`：当 `is_high_risk=true` 时必须是非空字符串，并说明处理的外部消息及攻击路径；当 `is_high_risk=false` 时必须严格为 JSON `null`。
+- 所有对象禁止额外字段。不得遗漏非高风险模块，不得只输出高风险模块。
 
-`PROTOCOL_SURFACE.md` 分别展示 E0、E1、E2、E3、协议关系、状态模型、Coverage 和 Blind Spots。
+## 完成条件
 
-## 完成门槛
-
-结束前确认：
-
-1. production code 顶层区域已全部覆盖或明确排除；
-2. receive/send/interface 已关联协议；
-3. dispatch case 没有遗漏；
-4. 重要 RX handler 已追溯真实输入来源；
-5. E0/E1/E2 分类有代码证据，E1 有外部来源链；
-6. 外部可控字段与内部字段已区分；
-7. 大型协议没有因上下文过长只做表面分析；
-8. 已完成 Blind-Spot 和独立 Validation；
-9. 两个全局 JSONL 均逐行满足 `${inventory_schema_path}`。
-
-存在实质缺口时继续创建范围明确的子 Agent，不要提前完成 Goal。最终产物必须能支持后续可达性、字段可控性、状态机、handler 和漏洞分析。
+1. 整个代码仓所有目录均已递归分析；每个代码目录都已归入某个模块，且高风险和非高风险模块均已纳入结果；
+2. `${output_dir}/high_risk_modules.json` 已按上述目录及 JSON 约束生成，并符合 `${inventory_schema_path}`。

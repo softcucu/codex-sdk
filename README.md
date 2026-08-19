@@ -261,11 +261,11 @@ except GoalResumeExhaustedError as exc:
 
 ## 可恢复漏洞审计工作流
 
-`codex-vuln-audit` 会依次执行攻击面分析、逐消息漏洞审计和逐协议整体审计。每个任务使用独立、持久化的 Codex thread；进程中断后重新运行同一命令即可恢复，已通过校验并写入完成标志的任务会被跳过。
+`codex-vuln-audit` 会先梳理仓库中的全部代码模块，识别具有攻击者可控外部消息处理入口的高风险模块，再为每个高风险模块寻找一个可由外部消息触发的 DoS 问题。每个任务使用独立、持久化的 Codex thread；进程中断后重新运行同一命令即可恢复，已通过校验并写入完成标志的任务会被跳过。
 
-如果攻击面分析此前已经由其他方式完成，可在已有 `protocol_inventory.jsonl`、`message_inventory.jsonl` 等产物旁创建一个空的 `ATTACK_SURFACE_COMPLETE.json`。工作流看到该文件后会直接跳过耗时的第一阶段；该文件内容和哈希不参与判断。后续任务仍需要现有 inventory 能够正常解析。
+如果第一阶段此前已经由其他方式完成，可在合法的 `high_risk_modules.json` 旁创建一个空的 `ATTACK_SURFACE_COMPLETE.json`。工作流看到该文件后会跳过耗时的第一阶段；标志文件内容和哈希不参与判断，`high_risk_modules.json` 仍须通过严格校验。
 
-工作流会在第一阶段开始前将固定 JSON Schema 复制为 `protocol-analysis/inventory_schema.json`。攻击面 Goal 从该文件读取 `protocol_record` 和 `message_record` 的严格字段契约，避免把大段 schema 放进受 4000 字符限制的 Goal objective。
+工作流会在第一阶段开始前将固定 JSON Schema 复制为 `protocol-analysis/inventory_schema.json`。第一阶段 Goal 从该文件读取 `module_record` 的严格字段契约，并只生成 `protocol-analysis/high_risk_modules.json`。该文件顶层是数组，每个模块严格包含 `name`、`is_high_risk`、`code_dir`、`reason`；非高风险模块的 `reason` 必须是 `null`。
 
 ```bash
 codex-vuln-audit \
@@ -275,16 +275,15 @@ codex-vuln-audit \
   --task-retries 2
 ```
 
-默认产物位于目标仓的 `protocol-analysis/`。消息和协议审计结果统一写入 `protocol-analysis/vulnerability-analysis/results/`，通过唯一 task ID 区分，例如：
+默认产物位于目标仓的 `protocol-analysis/`。高风险模块的 DoS 审计结果统一写入 `protocol-analysis/vulnerability-analysis/results/`，通过唯一 task ID 区分，例如：
 
 ```text
-message--ngap--rx--initial-ue-message.audit.json
-message--ngap--rx--initial-ue-message.漏洞报告.md
-message--ngap--rx--initial-ue-message.complete.json
-protocol--ngap.audit.json
+NetworkHandler-DoS-001.md
 ```
 
-单个消息或协议任务终态失败后会创建新 Goal 重试；默认额外重试两次。重试耗尽不会阻止其他独立任务，但最终状态为 `partial`、CLI 退出码为 `2`，并在 `SUMMARY.md` 和 `coverage.md` 中记录缺口。攻击面阶段失败时无法创建下游任务，退出码为 `1`。`--force` 会开启新一代工作流并全量重做；目标仓代码变化本身不会自动使已有结果失效。
+报告文件名固定为“模块名-DoS-编号.md”，每个模块只输出一个 DoS 漏洞报告。工作流只检查文件存在、UTF-8 可读且内容非空，不严格校验 Markdown 结构；`task_id` 只在工作流内部用于恢复和重试，不会写入提示词要求的报告名称或正文。
+
+单个高风险模块任务终态失败后会创建新 Goal 重试；默认额外重试两次。重试耗尽不会阻止其他独立任务，但最终状态为 `partial`、CLI 退出码为 `2`，并在 `SUMMARY.md` 和 `coverage.md` 中记录缺口。第一阶段失败时无法创建下游任务，退出码为 `1`。`--force` 会开启新一代工作流并全量重做；目标仓代码变化本身不会自动使已有结果失效。
 
 Python API：
 

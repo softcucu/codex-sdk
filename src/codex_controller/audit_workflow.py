@@ -25,13 +25,8 @@ from .controller import CodexController
 
 _STATE_SCHEMA_VERSION = 1
 _MAX_GOAL_OBJECTIVE_CHARS = 4000
-_AUDIT_VERDICTS = {
-    "VULNERABLE",
-    "NO_CONFIRMED_VULNERABILITY",
-    "INCONCLUSIVE",
-}
 _TERMINAL_GOAL_FAILURES = {"blocked", "budgetLimited"}
-_TASK_KINDS = {"attack-surface", "message", "protocol"}
+_TASK_KINDS = {"attack-surface", "module"}
 
 
 class AuditWorkflowError(RuntimeError):
@@ -74,6 +69,7 @@ class AuditWorkflowConfig:
     attack_surface_schema: str | Path | None = None
     message_prompt: str | Path | None = None
     protocol_prompt: str | Path | None = None
+    module_prompt: str | Path | None = None
 
     def __post_init__(self) -> None:
         project_dir = Path(self.project_dir).expanduser().resolve()
@@ -148,27 +144,36 @@ class AuditWorkflowResult:
             return 2
         return 1
 
+    @property
+    def high_risk_module_total(self) -> int:
+        """Number of scheduled high-risk module audits.
+
+        ``protocol_total`` remains the backing field for API compatibility.
+        """
+
+        return self.protocol_total
+
+    @property
+    def high_risk_module_completed(self) -> int:
+        return self.protocol_completed
+
+    @property
+    def high_risk_module_failed(self) -> int:
+        return self.protocol_failed
+
 
 @dataclass(frozen=True, slots=True)
-class _ProtocolRecord:
-    protocol_id: str
-    protocol_name: str
-    raw: dict[str, Any]
-
-
-@dataclass(frozen=True, slots=True)
-class _MessageRecord:
-    protocol_id: str
-    message_id: str
-    message_name: str
-    direction: str
+class _ModuleRecord:
+    name: str
+    is_high_risk: bool
+    code_dir: str
+    reason: str | None
     raw: dict[str, Any]
 
 
 @dataclass(frozen=True, slots=True)
 class _SurfaceInventory:
-    protocols: tuple[_ProtocolRecord, ...]
-    messages: tuple[_MessageRecord, ...]
+    modules: tuple[_ModuleRecord, ...]
     hashes: dict[str, str]
 
 
@@ -185,6 +190,7 @@ class _TaskSpec:
     message_id: str | None = None
     message_name: str | None = None
     direction: str | None = None
+    report_filename: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -282,6 +288,7 @@ class VulnerabilityAuditWorkflow:
         self.results_root = self.output_dir / "vulnerability-analysis"
         self.results_dir = self.results_root / "results"
         self.logs_dir = self.workflow_dir / "logs"
+        self.completions_dir = self.workflow_dir / "completions"
         self.state_path = self.workflow_dir / "state.json"
         self.lock_path = self.workflow_dir / "workflow.lock"
         self.attack_marker_path = self.output_dir / "ATTACK_SURFACE_COMPLETE.json"
@@ -296,6 +303,7 @@ class VulnerabilityAuditWorkflow:
         self.workflow_dir.mkdir(parents=True, exist_ok=True)
         self.results_dir.mkdir(parents=True, exist_ok=True)
         self.logs_dir.mkdir(parents=True, exist_ok=True)
+        self.completions_dir.mkdir(parents=True, exist_ok=True)
 
         with _WorkflowFileLock(self.lock_path):
             self._load_state()
@@ -308,11 +316,9 @@ class VulnerabilityAuditWorkflow:
                 return self._finalize_surface_failure(attack_outcome)
 
             surface = self._validate_surface()
-            message_specs = self._message_specs(surface)
-            message_outcomes = self._execute_batch(message_specs)
-            protocol_specs = self._protocol_specs(surface, message_outcomes)
-            protocol_outcomes = self._execute_batch(protocol_specs)
-            return self._finalize(message_outcomes, protocol_outcomes)
+            module_specs = self._module_specs(surface)
+            module_outcomes = self._execute_batch(module_specs)
+            return self._finalize([], module_outcomes)
 
     def _load_state(self) -> None:
         with self._state_lock:
@@ -352,7 +358,7 @@ class VulnerabilityAuditWorkflow:
     def _archive_completion_markers(self, generation: int) -> None:
         archive = self.workflow_dir / "force-archives" / f"generation-{generation}"
         candidates = [self.attack_marker_path, self.finished_path]
-        candidates.extend(sorted(self.results_dir.glob("*.complete.json")))
+        candidates.extend(sorted(self.completions_dir.glob("*.complete.json")))
         existing = [path for path in candidates if path.exists()]
         if not existing:
             return
@@ -407,13 +413,9 @@ class VulnerabilityAuditWorkflow:
         except json.JSONDecodeError as exc:
             raise AuditWorkflowError(f"invalid attack-surface inventory schema: {exc}") from exc
         definitions = schema.get("$defs") if isinstance(schema, dict) else None
-        if not isinstance(definitions, dict) or not {
-            "protocol_record",
-            "message_record",
-        }.issubset(definitions):
+        if not isinstance(definitions, dict) or "module_record" not in definitions:
             raise AuditWorkflowError(
-                "attack-surface inventory schema must define protocol_record "
-                "and message_record"
+                "attack-surface inventory schema must define module_record"
             )
         normalized = json.dumps(schema, ensure_ascii=False, indent=2) + "\n"
         if (
@@ -427,142 +429,62 @@ class VulnerabilityAuditWorkflow:
         relative = path.relative_to(Path(self.config.project_dir))
         return f"./{relative.as_posix()}"
 
-    def _message_specs(self, surface: _SurfaceInventory) -> list[_TaskSpec]:
+    def _module_specs(self, surface: _SurfaceInventory) -> list[_TaskSpec]:
         template = Template(
             self._read_prompt(
-                "message_vulnerability_analysis_goal.txt", self.config.message_prompt
+                "module_dos_analysis_goal.txt",
+                self.config.module_prompt or self.config.protocol_prompt,
             )
         )
-        protocol_by_id = {item.protocol_id: item for item in surface.protocols}
-        messages = sorted(
-            surface.messages,
-            key=lambda item: (item.protocol_id, item.direction, item.message_id),
+        modules = sorted(
+            (item for item in surface.modules if item.is_high_risk),
+            key=lambda item: (item.name.casefold(), item.code_dir),
         )
-        bases = [
-            "--".join(
-                (
-                    "message",
-                    _slug(item.protocol_id),
-                    _slug(item.direction),
-                    _slug(item.message_id),
-                )
-            )
-            for item in messages
-        ]
+        module_ids = _disambiguate_task_ids(
+            [_slug(item.name) for item in modules],
+            [f"{item.name}\0{item.code_dir}" for item in modules],
+        )
+        bases = [f"module--{module_id}" for module_id in module_ids]
         task_ids = _disambiguate_task_ids(
             bases,
-            [f"{item.protocol_id}\0{item.direction}\0{item.message_id}" for item in messages],
+            [f"{item.name}\0{item.code_dir}" for item in modules],
         )
+        report_filenames = [_module_report_filename(item.name) for item in modules]
+        if len(set(report_filenames)) != len(report_filenames):
+            raise AuditWorkflowError(
+                "high-risk module names produce duplicate report filenames"
+            )
 
         specs: list[_TaskSpec] = []
-        for item, task_id in zip(messages, task_ids):
-            protocol = protocol_by_id[item.protocol_id]
+        for module, module_id, task_id, report_filename in zip(
+            modules,
+            module_ids,
+            task_ids,
+            report_filenames,
+        ):
             objective = template.substitute(
-                task_id=task_id,
-                protocol_id=_json_string_content(item.protocol_id),
-                protocol_name=_prompt_text(protocol.protocol_name),
-                message_id=_json_string_content(item.message_id),
-                message_name=_prompt_text(item.message_name),
-                direction=_json_string_content(item.direction),
+                module_name=_prompt_text(module.name),
+                code_dir=_prompt_text(module.code_dir),
                 output_dir=_prompt_text(self.results_dir),
+                report_filename=_prompt_text(report_filename),
             )
             input_hash = _hash_json(
                 {
                     "objective": objective,
-                    "protocol": protocol.raw,
-                    "message": item.raw,
+                    "module": module.raw,
                 }
             )
             specs.append(
                 _TaskSpec(
                     task_id=task_id,
-                    kind="message",
-                    objective=objective,
-                    input_hash=input_hash,
-                    model=self.config.message_model or self.config.model,
-                    token_budget=self.config.message_token_budget,
-                    protocol_id=item.protocol_id,
-                    protocol_name=protocol.protocol_name,
-                    message_id=item.message_id,
-                    message_name=item.message_name,
-                    direction=item.direction,
-                )
-            )
-        return specs
-
-    def _protocol_specs(
-        self,
-        surface: _SurfaceInventory,
-        message_outcomes: list[_TaskOutcome],
-    ) -> list[_TaskSpec]:
-        template = Template(
-            self._read_prompt(
-                "protocol_vulnerability_analysis_goal.txt", self.config.protocol_prompt
-            )
-        )
-        protocols = sorted(surface.protocols, key=lambda item: item.protocol_id)
-        bases = [f"protocol--{_slug(item.protocol_id)}" for item in protocols]
-        task_ids = _disambiguate_task_ids(
-            bases,
-            [item.protocol_id for item in protocols],
-        )
-        outcomes_by_identity: dict[tuple[str | None, str | None, str | None], _TaskOutcome] = {}
-        for outcome in message_outcomes:
-            key = (
-                self._state_task_protocol(outcome.task_id),
-                self._state_task_message(outcome.task_id),
-                self._state_task_direction(outcome.task_id),
-            )
-            if key in outcomes_by_identity:
-                raise AuditWorkflowError(f"duplicate message task identity: {key}")
-            outcomes_by_identity[key] = outcome
-        member_data: dict[str, list[dict[str, Any]]] = {
-            item.protocol_id: [] for item in protocols
-        }
-        for message in surface.messages:
-            outcome = outcomes_by_identity.get(
-                (message.protocol_id, message.message_id, message.direction)
-            )
-            member_data.setdefault(message.protocol_id, []).append(
-                {
-                    "message": message.raw,
-                    "task_id": outcome.task_id if outcome else None,
-                    "completed": outcome.completed if outcome else False,
-                    "verdict": outcome.verdict if outcome else None,
-                    "audit_sha256": (
-                        _sha256_file(outcome.audit_path)
-                        if outcome is not None and outcome.audit_path is not None
-                        and outcome.audit_path.exists()
-                        else None
-                    ),
-                }
-            )
-
-        specs: list[_TaskSpec] = []
-        for protocol, task_id in zip(protocols, task_ids):
-            objective = template.substitute(
-                task_id=task_id,
-                protocol_id=_json_string_content(protocol.protocol_id),
-                protocol_name=_prompt_text(protocol.protocol_name),
-                output_dir=_prompt_text(self.results_dir),
-            )
-            input_hash = _hash_json(
-                {
-                    "objective": objective,
-                    "protocol": protocol.raw,
-                    "messages": member_data.get(protocol.protocol_id, []),
-                }
-            )
-            specs.append(
-                _TaskSpec(
-                    task_id=task_id,
-                    kind="protocol",
+                    kind="module",
                     objective=objective,
                     input_hash=input_hash,
                     model=self.config.protocol_model or self.config.model,
                     token_budget=self.config.protocol_token_budget,
-                    protocol_id=protocol.protocol_id,
-                    protocol_name=protocol.protocol_name,
+                    protocol_id=module_id,
+                    protocol_name=module.name,
+                    report_filename=report_filename,
                 )
             )
         return specs
@@ -834,17 +756,12 @@ class VulnerabilityAuditWorkflow:
             task["verdict"] = "INCONCLUSIVE" if spec.kind != "attack-surface" else None
             task["updated_at"] = _utc_now()
             self._save_state_locked()
-        audit_path = None
-        if spec.kind != "attack-surface":
-            audit_path = self._existing_failure_audit(spec)
-            if audit_path is None:
-                audit_path = self._write_failure_audit(spec, message)
         return _TaskOutcome(
             task_id=spec.task_id,
             kind=spec.kind,
             completed=False,
             verdict="INCONCLUSIVE" if spec.kind != "attack-surface" else None,
-            audit_path=audit_path,
+            audit_path=None,
             error=message,
         )
 
@@ -892,133 +809,51 @@ class VulnerabilityAuditWorkflow:
         return self._validate_audit(spec)
 
     def _validate_surface(self) -> _SurfaceInventory:
-        required = {
-            "PROTOCOL_SURFACE.md": self.output_dir / "PROTOCOL_SURFACE.md",
-            "protocol_inventory.jsonl": self.output_dir / "protocol_inventory.jsonl",
-            "message_inventory.jsonl": self.output_dir / "message_inventory.jsonl",
-            "coverage.md": self.output_dir / "coverage.md",
-        }
-        missing = [name for name, path in required.items() if not path.is_file()]
-        if missing:
+        name = "high_risk_modules.json"
+        path = self.output_dir / name
+        if not path.is_file():
             raise AuditOutputValidationError(
-                "attack-surface output is missing: " + ", ".join(missing)
+                f"attack-surface output is missing: {name}"
             )
-        for name in ("PROTOCOL_SURFACE.md", "coverage.md"):
-            if not required[name].read_text(encoding="utf-8").strip():
-                raise AuditOutputValidationError(f"attack-surface output is empty: {name}")
-
-        protocol_data = _read_jsonl(required["protocol_inventory.jsonl"])
-        message_data = _read_jsonl(required["message_inventory.jsonl"])
-        protocols = _normalize_protocols(protocol_data)
-        messages = _normalize_messages(message_data, protocols)
-        hashes = {name: _sha256_file(path) for name, path in required.items()}
-        return _SurfaceInventory(tuple(protocols), tuple(messages), hashes)
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise AuditOutputValidationError(f"invalid JSON in {name}: {exc}") from exc
+        modules = _normalize_modules(
+            data,
+            project_dir=Path(self.config.project_dir),
+            output_dir=self.output_dir,
+        )
+        return _SurfaceInventory(tuple(modules), {name: _sha256_file(path)})
 
     def _validate_audit(self, spec: _TaskSpec) -> _ValidatedOutput:
-        audit_path = self.results_dir / f"{spec.task_id}.audit.json"
-        report_path = self.results_dir / f"{spec.task_id}.漏洞报告.md"
-        if not audit_path.is_file():
-            raise AuditOutputValidationError(f"missing audit file: {audit_path.name}")
+        if not spec.report_filename:
+            raise AuditOutputValidationError("module task has no report filename")
+        report_path = self.results_dir / spec.report_filename
+        if not report_path.is_file():
+            raise AuditOutputValidationError(f"missing report: {report_path.name}")
         try:
-            data = json.loads(audit_path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            report = report_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
             raise AuditOutputValidationError(
-                f"invalid JSON in {audit_path.name}: {exc}"
+                f"cannot read report {report_path.name}: {exc}"
             ) from exc
-        if not isinstance(data, dict):
-            raise AuditOutputValidationError("audit result must be a JSON object")
-        expected = {
-            "task_id": spec.task_id,
-            "protocol_id": spec.protocol_id,
-        }
-        if spec.kind == "message":
-            expected.update(
-                {
-                    "message_id": spec.message_id,
-                    "direction": spec.direction,
-                }
-            )
-        for key, value in expected.items():
-            if data.get(key) != value:
-                raise AuditOutputValidationError(
-                    f"{audit_path.name}: {key} must be {value!r}"
-                )
-
-        verdict = data.get("verdict")
-        if verdict not in _AUDIT_VERDICTS:
-            raise AuditOutputValidationError(f"{audit_path.name}: invalid verdict")
-        if not isinstance(data.get("summary"), str) or not data["summary"].strip():
-            raise AuditOutputValidationError(f"{audit_path.name}: summary is required")
-        findings = data.get("findings")
-        if not isinstance(findings, list):
-            raise AuditOutputValidationError(f"{audit_path.name}: findings must be a list")
-        if not isinstance(data.get("coverage_gaps"), list):
+        if not report.strip():
             raise AuditOutputValidationError(
-                f"{audit_path.name}: coverage_gaps must be a list"
+                f"report is empty: {report_path.name}"
             )
-        if spec.kind == "message":
-            for key in ("reachability", "controllable_fields", "preconditions"):
-                if key not in data:
-                    raise AuditOutputValidationError(f"{audit_path.name}: missing {key}")
-        else:
-            for key in ("attack_surface", "protocol_model", "security_invariants"):
-                if key not in data:
-                    raise AuditOutputValidationError(f"{audit_path.name}: missing {key}")
-
-        required_finding = {
-            "id",
-            "title",
-            "severity",
-            "root_cause",
-            "impact",
-            "evidence",
-            "remediation",
-        }
-        required_finding.add("attack_path" if spec.kind == "message" else "attack_sequence")
-        for index, finding in enumerate(findings):
-            if not isinstance(finding, dict):
-                raise AuditOutputValidationError(
-                    f"{audit_path.name}: finding {index} must be an object"
-                )
-            missing = required_finding - finding.keys()
-            if missing:
-                raise AuditOutputValidationError(
-                    f"{audit_path.name}: finding {index} is missing {sorted(missing)}"
-                )
-            if finding.get("severity") not in {"CRITICAL", "HIGH", "MEDIUM", "LOW"}:
-                raise AuditOutputValidationError(
-                    f"{audit_path.name}: finding {index} has invalid severity"
-                )
-            if not isinstance(finding.get("evidence"), list) or not finding["evidence"]:
-                raise AuditOutputValidationError(
-                    f"{audit_path.name}: finding {index} requires evidence"
-                )
-
-        vulnerable = bool(findings)
-        if vulnerable != (verdict == "VULNERABLE"):
+        legacy_json = self.results_dir / f"{spec.task_id}.audit.json"
+        if legacy_json.exists():
             raise AuditOutputValidationError(
-                f"{audit_path.name}: verdict and findings are inconsistent"
-            )
-        if vulnerable:
-            if not report_path.is_file() or not report_path.read_text(
-                encoding="utf-8"
-            ).strip():
-                raise AuditOutputValidationError(
-                    f"{audit_path.name}: confirmed findings require {report_path.name}"
-                )
-        elif report_path.exists():
-            raise AuditOutputValidationError(
-                f"{audit_path.name}: report must not exist without confirmed findings"
+                f"{report_path.name}: JSON output must not be created"
             )
 
-        hashes = {audit_path.name: _sha256_file(audit_path)}
-        if vulnerable:
-            hashes[report_path.name] = _sha256_file(report_path)
+        hashes = {report_path.name: _sha256_file(report_path)}
         return _ValidatedOutput(
-            verdict=str(verdict),
-            findings_count=len(findings),
-            audit_path=audit_path,
-            report_path=report_path if vulnerable else None,
+            verdict="VULNERABLE",
+            findings_count=1,
+            audit_path=report_path,
+            report_path=report_path,
             hashes=hashes,
         )
 
@@ -1044,7 +879,7 @@ class VulnerabilityAuditWorkflow:
     def _completion_marker_path(self, spec: _TaskSpec) -> Path:
         if spec.kind == "attack-surface":
             return self.attack_marker_path
-        return self.results_dir / f"{spec.task_id}.complete.json"
+        return self.completions_dir / f"{spec.task_id}.complete.json"
 
     def _outcome_from_validated(
         self, spec: _TaskSpec, validated: _ValidatedOutput
@@ -1058,67 +893,9 @@ class VulnerabilityAuditWorkflow:
             audit_path=validated.audit_path,
         )
 
-    def _write_failure_audit(self, spec: _TaskSpec, error: str) -> Path:
-        attempt = int(self._task_snapshot(spec.task_id).get("attempt_count", 0))
-        self._archive_task_artifacts(spec, max(1, attempt))
-        data: dict[str, Any] = {
-            "task_id": spec.task_id,
-            "protocol_id": spec.protocol_id,
-            "verdict": "INCONCLUSIVE",
-            "summary": "审计任务在重试耗尽后仍未成功完成。",
-            "findings": [],
-            "coverage_gaps": [error],
-            "execution_status": "failed",
-        }
-        if spec.kind == "message":
-            data.update(
-                {
-                    "message_id": spec.message_id,
-                    "direction": spec.direction,
-                    "reachability": "未完成",
-                    "controllable_fields": [],
-                    "preconditions": [],
-                }
-            )
-        else:
-            data.update(
-                {
-                    "attack_surface": "未完成",
-                    "protocol_model": [],
-                    "security_invariants": [],
-                }
-            )
-        path = self.results_dir / f"{spec.task_id}.audit.json"
-        _atomic_write_json(path, data)
-        return path
-
-    def _existing_failure_audit(self, spec: _TaskSpec) -> Path | None:
-        path = self.results_dir / f"{spec.task_id}.audit.json"
-        report = self.results_dir / f"{spec.task_id}.漏洞报告.md"
-        marker = self.results_dir / f"{spec.task_id}.complete.json"
-        if not path.is_file() or report.exists() or marker.exists():
-            return None
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, json.JSONDecodeError):
-            return None
-        if not isinstance(data, dict):
-            return None
-        if data.get("task_id") != spec.task_id:
-            return None
-        if data.get("execution_status") != "failed":
-            return None
-        if data.get("verdict") != "INCONCLUSIVE":
-            return None
-        return path
-
     def _archive_attack_artifacts(self, attempt: int) -> None:
         candidates = [
-            self.output_dir / "PROTOCOL_SURFACE.md",
-            self.output_dir / "protocol_inventory.jsonl",
-            self.output_dir / "message_inventory.jsonl",
-            self.output_dir / "coverage.md",
-            self.output_dir / "protocols",
+            self.output_dir / "high_risk_modules.json",
             self.attack_marker_path,
         ]
         existing = [path for path in candidates if path.exists()]
@@ -1138,8 +915,10 @@ class VulnerabilityAuditWorkflow:
         candidates = [
             self.results_dir / f"{spec.task_id}.audit.json",
             self.results_dir / f"{spec.task_id}.漏洞报告.md",
-            self.results_dir / f"{spec.task_id}.complete.json",
+            self._completion_marker_path(spec),
         ]
+        if spec.report_filename:
+            candidates.append(self.results_dir / spec.report_filename)
         existing = [path for path in candidates if path.exists()]
         if not existing:
             return
@@ -1258,8 +1037,7 @@ class VulnerabilityAuditWorkflow:
             self.coverage_path,
             "# Vulnerability Audit Coverage\n\n"
             "- Attack-surface analysis: failed\n"
-            "- Message audits: not started\n"
-            "- Protocol audits: not started\n"
+            "- High-risk module audits: not started\n"
             f"- Failure: {error}\n",
         )
         self._write_finished(result)
@@ -1269,9 +1047,9 @@ class VulnerabilityAuditWorkflow:
     def _finalize(
         self,
         message_outcomes: list[_TaskOutcome],
-        protocol_outcomes: list[_TaskOutcome],
+        module_outcomes: list[_TaskOutcome],
     ) -> AuditWorkflowResult:
-        all_outcomes = message_outcomes + protocol_outcomes
+        all_outcomes = message_outcomes + module_outcomes
         failed = tuple(outcome.task_id for outcome in all_outcomes if not outcome.completed)
         inconclusive = tuple(
             outcome.task_id
@@ -1291,9 +1069,9 @@ class VulnerabilityAuditWorkflow:
             message_total=len(message_outcomes),
             message_completed=sum(item.completed for item in message_outcomes),
             message_failed=sum(not item.completed for item in message_outcomes),
-            protocol_total=len(protocol_outcomes),
-            protocol_completed=sum(item.completed for item in protocol_outcomes),
-            protocol_failed=sum(not item.completed for item in protocol_outcomes),
+            protocol_total=len(module_outcomes),
+            protocol_completed=sum(item.completed for item in module_outcomes),
+            protocol_failed=sum(not item.completed for item in module_outcomes),
             inconclusive_tasks=inconclusive,
             failed_tasks=failed,
             confirmed_findings=findings,
@@ -1313,7 +1091,12 @@ class VulnerabilityAuditWorkflow:
                 "task_kind": outcome.kind,
                 "task_id": outcome.task_id,
                 "execution_status": "completed" if outcome.completed else "failed",
-                "protocol_id": task.get("protocol_id"),
+                "module_id": (
+                    task.get("protocol_id") if outcome.kind == "module" else None
+                ),
+                "protocol_id": (
+                    task.get("protocol_id") if outcome.kind == "message" else None
+                ),
                 "message_id": task.get("message_id"),
                 "direction": task.get("direction"),
                 "verdict": outcome.verdict,
@@ -1334,8 +1117,9 @@ class VulnerabilityAuditWorkflow:
             "# Vulnerability Audit Summary",
             "",
             f"- Workflow status: `{result.status.value}`",
-            f"- Message audits: {result.message_completed}/{result.message_total} completed",
-            f"- Protocol audits: {result.protocol_completed}/{result.protocol_total} completed",
+            "- High-risk module audits: "
+            f"{result.high_risk_module_completed}/"
+            f"{result.high_risk_module_total} completed",
             f"- Confirmed findings: {result.confirmed_findings}",
             f"- Failed tasks: {len(result.failed_tasks)}",
             f"- Inconclusive completed tasks: {len(result.inconclusive_tasks)}",
@@ -1345,17 +1129,10 @@ class VulnerabilityAuditWorkflow:
         for outcome in outcomes:
             if outcome.audit_path is None or not outcome.audit_path.is_file():
                 continue
-            try:
-                data = json.loads(outcome.audit_path.read_text(encoding="utf-8"))
-            except (OSError, UnicodeError, json.JSONDecodeError):
-                continue
-            for finding in data.get("findings", []) if isinstance(data, dict) else []:
-                if isinstance(finding, dict):
-                    finding_lines.append(
-                        f"- `{outcome.task_id}` / `{finding.get('id', 'unknown')}`: "
-                        f"{finding.get('title', 'untitled')} "
-                        f"({finding.get('severity', 'UNKNOWN')})"
-                    )
+            relative = outcome.audit_path.relative_to(self.results_root).as_posix()
+            finding_lines.append(
+                f"- `{outcome.task_id}`: [{outcome.audit_path.name}]({relative})"
+            )
         lines.extend(["## Confirmed Findings", ""])
         lines.extend(finding_lines or ["No confirmed findings."])
         if result.failed_tasks:
@@ -1420,6 +1197,9 @@ class VulnerabilityAuditWorkflow:
                 "protocol_total": result.protocol_total,
                 "protocol_completed": result.protocol_completed,
                 "protocol_failed": result.protocol_failed,
+                "high_risk_module_total": result.high_risk_module_total,
+                "high_risk_module_completed": result.high_risk_module_completed,
+                "high_risk_module_failed": result.high_risk_module_failed,
                 "confirmed_findings": result.confirmed_findings,
                 "failed_tasks": list(result.failed_tasks),
                 "inconclusive_tasks": list(result.inconclusive_tasks),
@@ -1441,182 +1221,116 @@ def _execution_from_result(result: Any) -> _GoalExecution:
     return _GoalExecution(completed, status, _exception_text(error) if error else None)
 
 
-def _read_jsonl(path: Path) -> list[dict[str, Any]]:
-    records: list[dict[str, Any]] = []
-    try:
-        with path.open("r", encoding="utf-8") as handle:
-            for line_number, line in enumerate(handle, 1):
-                if not line.strip():
-                    continue
-                try:
-                    value = json.loads(line)
-                except json.JSONDecodeError as exc:
-                    raise AuditOutputValidationError(
-                        f"{path.name}:{line_number}: invalid JSON: {exc.msg}"
-                    ) from exc
-                if not isinstance(value, dict):
-                    raise AuditOutputValidationError(
-                        f"{path.name}:{line_number}: record must be an object"
-                    )
-                records.append(value)
-    except (OSError, UnicodeError) as exc:
-        raise AuditOutputValidationError(f"cannot read {path}: {exc}") from exc
-    return records
+def _normalize_modules(
+    value: Any,
+    *,
+    project_dir: Path,
+    output_dir: Path,
+) -> list[_ModuleRecord]:
+    filename = "high_risk_modules.json"
+    if not isinstance(value, list):
+        raise AuditOutputValidationError(f"{filename}: top-level value must be an array")
+    if not value:
+        raise AuditOutputValidationError(f"{filename}: at least one module is required")
 
+    required_keys = {"name", "is_high_risk", "code_dir", "reason"}
+    seen_names: set[str] = set()
+    seen_dirs: set[str] = set()
+    modules: list[_ModuleRecord] = []
+    project_dir = project_dir.resolve()
+    output_dir = output_dir.resolve()
 
-def _normalize_protocols(records: list[dict[str, Any]]) -> list[_ProtocolRecord]:
-    protocols: list[_ProtocolRecord] = []
-    seen: set[str] = set()
-    for index, raw in enumerate(records, 1):
-        protocol_value = raw.get("protocol")
-        protocol_id = _first_text(raw, "protocol_id", "protocolId", "id")
-        protocol_name = _first_text(raw, "protocol_name", "protocolName", "name")
-        if isinstance(protocol_value, dict):
-            protocol_id = protocol_id or _first_text(
-                protocol_value, "protocol_id", "protocolId", "id"
-            )
-            protocol_name = protocol_name or _first_text(
-                protocol_value, "protocol_name", "protocolName", "name"
-            )
-        elif isinstance(protocol_value, str):
-            protocol_name = protocol_name or protocol_value.strip()
-        protocol_id = protocol_id or (_slug(protocol_name) if protocol_name else None)
-        protocol_name = protocol_name or protocol_id
-        if not protocol_id or not protocol_name:
+    for index, raw in enumerate(value):
+        location = f"{filename}:{index}"
+        if not isinstance(raw, dict):
+            raise AuditOutputValidationError(f"{location}: module must be an object")
+        keys = set(raw)
+        if keys != required_keys:
+            missing = sorted(required_keys - keys)
+            extra = sorted(keys - required_keys)
             raise AuditOutputValidationError(
-                f"protocol_inventory.jsonl:{index}: protocol id/name is required"
+                f"{location}: fields must be exactly {sorted(required_keys)}; "
+                f"missing={missing}, extra={extra}"
             )
-        normalized_key = _identity_key(protocol_id)
-        if normalized_key in seen:
-            raise AuditOutputValidationError(
-                f"protocol_inventory.jsonl:{index}: duplicate protocol {protocol_id!r}"
-            )
-        seen.add(normalized_key)
-        protocols.append(_ProtocolRecord(protocol_id, protocol_name, raw))
-    return protocols
 
+        name = raw["name"]
+        if not isinstance(name, str) or not name.strip():
+            raise AuditOutputValidationError(f"{location}: name must be a non-empty string")
+        if name != name.strip():
+            raise AuditOutputValidationError(
+                f"{location}: name must not have leading or trailing whitespace"
+            )
+        name_key = unicodedata.normalize("NFKC", name).casefold()
+        if name_key in seen_names:
+            raise AuditOutputValidationError(f"{location}: duplicate module name {name!r}")
+        seen_names.add(name_key)
 
-def _normalize_messages(
-    records: list[dict[str, Any]], protocols: list[_ProtocolRecord]
-) -> list[_MessageRecord]:
-    by_key = {_identity_key(item.protocol_id): item for item in protocols}
-    for item in protocols:
-        by_key.setdefault(_identity_key(item.protocol_name), item)
-    messages: list[_MessageRecord] = []
-    seen: set[tuple[str, str, str]] = set()
-    for index, raw in enumerate(records, 1):
-        protocol_value = raw.get("protocol")
-        message_value = raw.get("message")
-        combined = raw.get("protocol/message")
-        protocol_text = _first_text(raw, "protocol_id", "protocolId")
-        message_id = _first_text(
-            raw,
-            "message_id",
-            "messageId",
-            "msg_type_id",
-            "msgTypeId",
-            "message_type_id",
-            "messageTypeId",
-            "msg_id",
-            "id",
-        )
-        message_name = _first_text(
-            raw,
-            "message_name",
-            "messageName",
-            "msg_type_name",
-            "msgTypeName",
-            "message_type_name",
-            "messageTypeName",
-            "msg_name",
-            "name",
-        )
-        if isinstance(protocol_value, dict):
-            protocol_text = protocol_text or _first_text(
-                protocol_value, "protocol_id", "protocolId", "id", "name"
+        is_high_risk = raw["is_high_risk"]
+        if type(is_high_risk) is not bool:
+            raise AuditOutputValidationError(
+                f"{location}: is_high_risk must be a JSON boolean"
             )
-        elif isinstance(protocol_value, str):
-            protocol_text = protocol_text or protocol_value.strip()
-        if isinstance(message_value, dict):
-            message_id = message_id or _first_text(
-                message_value,
-                "message_id",
-                "messageId",
-                "msg_type_id",
-                "msgTypeId",
-                "message_type_id",
-                "messageTypeId",
-                "msg_id",
-                "id",
-            )
-            message_name = message_name or _first_text(
-                message_value,
-                "message_name",
-                "messageName",
-                "msg_type_name",
-                "msgTypeName",
-                "message_type_name",
-                "messageTypeName",
-                "msg_name",
-                "name",
-            )
-        elif isinstance(message_value, str):
-            message_name = message_name or message_value.strip()
-        if isinstance(combined, str) and "/" in combined:
-            combined_protocol, combined_message = combined.split("/", 1)
-            protocol_text = protocol_text or combined_protocol.strip()
-            message_name = message_name or combined_message.strip()
 
-        if not protocol_text and len(protocols) == 1:
-            protocol_text = protocols[0].protocol_id
-        protocol = by_key.get(_identity_key(protocol_text or ""))
-        if protocol is None:
+        code_dir = raw["code_dir"]
+        if not isinstance(code_dir, str) or not code_dir:
             raise AuditOutputValidationError(
-                f"message_inventory.jsonl:{index}: unknown protocol {protocol_text!r}"
+                f"{location}: code_dir must be a non-empty string"
             )
-        message_id = message_id or (_slug(message_name) if message_name else None)
-        message_name = message_name or message_id
-        if not message_id or not message_name:
-            raise AuditOutputValidationError(
-                f"message_inventory.jsonl:{index}: message id/name is required"
-            )
-        direction = _first_text(raw, "direction") or "UNKNOWN"
-        direction = direction.strip().upper().replace("-", "_")
-        if direction not in {"RX", "TX", "BIDIRECTIONAL", "INTERNAL", "UNKNOWN"}:
-            direction = "UNKNOWN"
-        key = (
-            _identity_key(protocol.protocol_id),
-            _identity_key(message_id),
-            direction,
-        )
-        if key in seen:
-            raise AuditOutputValidationError(
-                f"message_inventory.jsonl:{index}: duplicate message identity"
-            )
-        seen.add(key)
-        messages.append(
-            _MessageRecord(
-                protocol.protocol_id,
-                message_id,
-                message_name,
-                direction,
-                raw,
+        invalid_path = (
+            "\\" in code_dir
+            or code_dir.startswith("/")
+            or re.match(r"^[A-Za-z]:", code_dir) is not None
+            or code_dir.startswith("./")
+            or code_dir.endswith("/")
+            or "//" in code_dir
+            or (
+                code_dir != "."
+                and any(part in {"", ".", ".."} for part in code_dir.split("/"))
             )
         )
-    return messages
+        if invalid_path:
+            raise AuditOutputValidationError(
+                f"{location}: code_dir must be a normalized repository-relative directory"
+            )
+        code_dir_key = unicodedata.normalize("NFKC", code_dir).casefold()
+        if code_dir_key in seen_dirs:
+            raise AuditOutputValidationError(
+                f"{location}: duplicate code_dir {code_dir!r}"
+            )
+        seen_dirs.add(code_dir_key)
+        target = (project_dir / code_dir).resolve()
+        try:
+            target.relative_to(project_dir)
+        except ValueError as exc:
+            raise AuditOutputValidationError(
+                f"{location}: code_dir escapes the repository"
+            ) from exc
+        if not target.is_dir():
+            raise AuditOutputValidationError(
+                f"{location}: code_dir is not an existing directory: {code_dir!r}"
+            )
+        if target == output_dir or output_dir in target.parents:
+            raise AuditOutputValidationError(
+                f"{location}: code_dir must not point inside the analysis output directory"
+            )
 
+        reason = raw["reason"]
+        if is_high_risk:
+            if not isinstance(reason, str) or not reason.strip():
+                raise AuditOutputValidationError(
+                    f"{location}: a high-risk module requires a non-empty reason"
+                )
+            if reason != reason.strip():
+                raise AuditOutputValidationError(
+                    f"{location}: reason must not have leading or trailing whitespace"
+                )
+        elif reason is not None:
+            raise AuditOutputValidationError(
+                f"{location}: a non-high-risk module must use null for reason"
+            )
 
-def _first_text(data: dict[str, Any], *keys: str) -> str | None:
-    for key in keys:
-        value = data.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    return None
-
-
-def _identity_key(value: str) -> str:
-    normalized = unicodedata.normalize("NFKC", value).casefold()
-    return "".join(character for character in normalized if character.isalnum())
+        modules.append(_ModuleRecord(name, is_high_risk, code_dir, reason, raw))
+    return modules
 
 
 def _slug(value: str | None) -> str:
@@ -1624,6 +1338,19 @@ def _slug(value: str | None) -> str:
     ascii_value = normalized.encode("ascii", "ignore").decode("ascii").lower()
     slug = re.sub(r"[^a-z0-9]+", "-", ascii_value).strip("-")
     return (slug or "item")[:48]
+
+
+def _module_report_filename(module_name: str) -> str:
+    normalized = unicodedata.normalize("NFKC", module_name)
+    safe = "".join(
+        "-"
+        if character in '<>:"/\\|?*' or unicodedata.category(character).startswith("C")
+        else character
+        for character in normalized
+    )
+    safe = re.sub(r"\s+", "-", safe)
+    safe = re.sub(r"-+", "-", safe).strip(" .-")[:80].rstrip(" .-")
+    return f"{safe or 'module'}-DoS-001.md"
 
 
 def _disambiguate_task_ids(bases: list[str], identities: list[str]) -> list[str]:
