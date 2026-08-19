@@ -225,13 +225,14 @@ with open("codex-debug.jsonl", "w", encoding="utf-8") as log:
 - Goal 状态是 `usageLimited` 或非主动的 `paused`；
 - HTTP 408、409、425、429、500、502、503、504；
 - server overload、retry limit、响应流/连接中断；
+- 模型生成的工具参数 JSON 不完整或无法解析，并因此把 Goal 标成 `blocked`（自动恢复一次）；
 - app-server transport 关闭。此时封装会重启 runtime、重新加载同一 thread，再恢复已持久化的 Goal。
 
 SDK 在瞬态错误后需要同时收到 turn 结束和 Goal 状态通知，才会结束当前逻辑事件流。
 如果 429 后 Goal 状态已经持久化为 `usageLimited`，但对应状态通知丢失或无法解析，
 控制器会主动读取持久化状态并释放事件流；如果失败 turn 后 Goal 异常地继续保持
 `active` 且 30 秒没有新事件，控制器会结束这个僵死 operation，再交给上述自动恢复流程。
-这个检查只在已经观察到瞬态错误或失败 turn 后启用，不会限制正常的长时间工具调用。
+这个检查只在已经观察到错误事件或失败 turn 后启用，不会限制正常的长时间工具调用。
 
 重试采用带抖动的指数退避，默认从 5 秒开始，最大 300 秒。可以限制：
 

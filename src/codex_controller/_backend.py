@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import queue
-import re
 import time
 from dataclasses import dataclass
 from typing import Any, Callable, Iterator, Protocol
@@ -17,16 +16,6 @@ from openai_codex.generated.v2_all import (
 from pydantic import BaseModel
 
 from .errors import IncompatibleCodexSdkError, NoActiveGoalError
-
-
-_RETRYABLE_HTTP_STATUSES = {408, 409, 425, 429, 500, 502, 503, 504}
-_RETRYABLE_ERROR_TEXT = re.compile(
-    r"(?:\b(?:408|409|425|429|500|502|503|504)\b|"
-    r"(?:rate|usage)[ -]?limit|server.?overload|temporar(?:y|ily) unavailable|"
-    r"response stream (?:disconnected|connection failed)|connection (?:reset|closed|failed)|"
-    r"too many failed attempts|retry limit|timed? ?out)",
-    re.IGNORECASE,
-)
 
 
 @dataclass(slots=True)
@@ -88,8 +77,10 @@ class _GoalNotificationWatchdog:
     that case the SDK blocks forever and the controller never gets a chance to
     issue ``/goal resume``.
 
-    Polling starts only after a retryable error or a failed turn has been seen,
-    so a legitimately long-running tool call is not subject to this timeout.
+    Polling starts only after an error or a failed turn has been seen, so a
+    legitimately long-running tool call is not subject to this timeout. All
+    errors are observed here because a non-retryable request error can also
+    lose its terminal Goal notification and otherwise leave the stream stuck.
     """
 
     client: Any
@@ -98,7 +89,7 @@ class _GoalNotificationWatchdog:
     poll_interval_seconds: float
     stall_timeout_seconds: float
     clock: Callable[[], float] = time.monotonic
-    _retryable_error_seen: bool = False
+    _error_seen: bool = False
     _failed_completion_seen: bool = False
     _runtime_will_retry: bool | None = None
     _last_activity_at: float = 0.0
@@ -130,8 +121,8 @@ class _GoalNotificationWatchdog:
         method = str(getattr(notification, "method", ""))
         payload = _model_data(getattr(notification, "payload", notification))
 
-        if method == "error" and _contains_retryable_signal(payload):
-            self._retryable_error_seen = True
+        if method == "error":
+            self._error_seen = True
             if isinstance(payload, dict):
                 will_retry = payload.get("willRetry", payload.get("will_retry"))
                 if isinstance(will_retry, bool):
@@ -152,7 +143,7 @@ class _GoalNotificationWatchdog:
             self._clear_failure_signal()
 
     def _clear_failure_signal(self) -> None:
-        self._retryable_error_seen = False
+        self._error_seen = False
         self._failed_completion_seen = False
         self._runtime_will_retry = None
 
@@ -178,11 +169,11 @@ class _GoalNotificationWatchdog:
             raise TimeoutError(
                 "timed out after "
                 f"{stalled_for:.1f}s waiting for an active Goal stream to recover "
-                "from a transient error or failed turn"
+                "from an error or failed turn"
             )
 
     def _failure_suspected(self) -> bool:
-        if self._retryable_error_seen or self._failed_completion_seen:
+        if self._error_seen or self._failed_completion_seen:
             return True
         completed = getattr(self.state, "completed_turn", None)
         current_turn = getattr(self.state, "current_turn", None)
@@ -413,19 +404,3 @@ def _model_data(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [_model_data(item) for item in value]
     return _enum_value(value)
-
-
-def _contains_retryable_signal(value: Any) -> bool:
-    if isinstance(value, dict):
-        for key, item in value.items():
-            normalized_key = key.replace("_", "").lower()
-            if normalized_key == "httpstatuscode" and item in _RETRYABLE_HTTP_STATUSES:
-                return True
-            if _contains_retryable_signal(item):
-                return True
-        return False
-    if isinstance(value, list):
-        return any(_contains_retryable_signal(item) for item in value)
-    if isinstance(value, str):
-        return bool(_RETRYABLE_ERROR_TEXT.search(value))
-    return False

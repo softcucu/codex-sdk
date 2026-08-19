@@ -78,6 +78,21 @@ def retryable_error(*, will_retry: bool) -> Notification:
     return Notification(method="error", payload=payload)
 
 
+def malformed_json_error(*, will_retry: bool) -> Notification:
+    return Notification(
+        method="error",
+        payload={
+            "error": {
+                "message": "Unterminated string starting at line 1 column 8",
+                "type": "invalid_request_error",
+            },
+            "threadId": "thread-1",
+            "turnId": "turn-1",
+            "willRetry": will_retry,
+        },
+    )
+
+
 def test_goal_model_uses_thread_settings_update_protocol() -> None:
     client = RecordingClient()
 
@@ -99,6 +114,26 @@ def test_goal_watchdog_releases_stream_when_429_goal_is_persisted_terminal() -> 
     client = GoalStatusClient("usageLimited")
     state = WatchdogState()
     error = retryable_error(will_retry=False)
+    state._notifications.put(error)
+    watchdog = _GoalNotificationWatchdog(
+        client=client,
+        state=state,
+        thread_id="thread-1",
+        poll_interval_seconds=0,
+        stall_timeout_seconds=30,
+    )
+
+    assert watchdog() is error
+    with pytest.raises(_GoalStreamClosed):
+        watchdog()
+
+    assert client.calls == 1
+
+
+def test_goal_watchdog_releases_stream_after_nonretryable_400_error() -> None:
+    client = GoalStatusClient("blocked")
+    state = WatchdogState()
+    error = malformed_json_error(will_retry=False)
     state._notifications.put(error)
     watchdog = _GoalNotificationWatchdog(
         client=client,

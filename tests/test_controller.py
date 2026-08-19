@@ -11,7 +11,7 @@ from codex_controller import (
     ResumePolicy,
 )
 
-from conftest import DisconnectingBackend, FakeBackend
+from conftest import DisconnectingBackend, FakeBackend, MalformedJsonBlockedBackend
 
 
 def no_delay_policy(max_attempts: int | None = None) -> ResumePolicy:
@@ -165,6 +165,43 @@ def test_blocked_goal_is_returned_without_resume() -> None:
     assert not result.completed
     assert result.goal.status == "blocked"
     assert backend.resume_goal_calls == 0
+
+
+def test_blocked_goal_resumes_after_generated_tool_json_parse_error() -> None:
+    backend = MalformedJsonBlockedBackend()
+    output = io.StringIO()
+    controller = CodexController(
+        _backend=backend,
+        output=output,
+        output_mode="human",
+        resume_policy=no_delay_policy(),
+    )
+
+    result = controller.goal("recover malformed tool arguments")
+
+    assert result.completed
+    assert result.resume_count == 1
+    assert backend.start_goal_calls == 1
+    assert backend.resume_goal_calls == 1
+    assert "malformed generated JSON/tool arguments" in output.getvalue()
+
+
+def test_repeated_generated_tool_json_error_stops_after_one_automatic_resume() -> None:
+    backend = MalformedJsonBlockedBackend(repeat_on_resume=True)
+    controller = CodexController(
+        _backend=backend,
+        output=io.StringIO(),
+        output_mode="quiet",
+        resume_policy=no_delay_policy(),
+    )
+
+    result = controller.goal("do not loop forever on malformed tool arguments")
+
+    assert not result.completed
+    assert result.goal.status == "blocked"
+    assert result.resume_count == 1
+    assert backend.start_goal_calls == 1
+    assert backend.resume_goal_calls == 1
 
 
 def test_transport_close_reconnects_then_resumes_existing_goal() -> None:

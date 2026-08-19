@@ -148,6 +148,52 @@ class FakeBackend:
         }
 
 
+class MalformedJsonBlockedBackend(FakeBackend):
+    def __init__(self, *, repeat_on_resume: bool = False) -> None:
+        super().__init__(first_status="blocked")
+        self.repeat_on_resume = repeat_on_resume
+
+    def start_goal(
+        self, objective: str, token_budget: int | None, model: str | None
+    ) -> Operation:
+        self.start_goal_calls += 1
+        self.goal_models.append(model)
+        self.goal = self._goal_payload(objective, "blocked", token_budget)
+        return self._malformed_operation("turn-1")
+
+    def resume_goal(self, model: str | None) -> Operation:
+        if not self.repeat_on_resume:
+            return super().resume_goal(model)
+        self.resume_goal_calls += 1
+        self.goal_models.append(model)
+        assert self.goal is not None
+        self.goal = self._goal_payload(
+            str(self.goal["objective"]), "blocked", self.goal.get("tokenBudget")
+        )
+        return self._malformed_operation("turn-2")
+
+    def _malformed_operation(self, turn_id: str) -> Operation:
+        error = {
+            "message": (
+                '{"error":"Unterminated string starting at : line 1 column 8 '
+                '(char 7)","type":"BadRequestError","code":400}'
+            ),
+            "type": "invalid_request_error",
+            "code": None,
+        }
+        events = [
+            Notification(
+                "error",
+                {"turnId": turn_id, "error": error, "willRetry": False},
+            ),
+            Notification(
+                "turn/completed",
+                {"turn": {"id": turn_id, "status": "failed", "error": error}},
+            ),
+        ]
+        return Operation(turn_id, iter(events), self._cancel)
+
+
 class DisconnectingBackend(FakeBackend):
     def __init__(self) -> None:
         super().__init__()

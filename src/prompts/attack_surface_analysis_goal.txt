@@ -26,6 +26,8 @@
 
 子 Agent 详细结果写文件，只向 Main Agent 返回摘要和结果路径。
 
+所有工具调用必须通过原生工具接口提交符合工具 schema 的完整 JSON 参数（使用双引号，禁止截断或用 Python 字面量代替 JSON）。若工具返回 `invalid JSON`、`Unterminated string` 或 tool arguments 解析错误，先修正参数并重试；这类可恢复错误不是需要用户输入的阻塞条件，不得因此把 Goal 标记为 `blocked`。
+
 ## 分类规则
 
 消息实现状态：`DEFINED`（存在定义）、`DECODED`（生产代码可解析）、`DISPATCHED`（存在生产分发）、`HANDLED`（存在业务 handler）。不得因存在定义、decoder 或孤立 handler 就认定真实可达。

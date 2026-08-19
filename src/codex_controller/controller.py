@@ -18,12 +18,21 @@ from .render import EventRenderer
 
 _RETRYABLE_GOAL_STATUSES = {"paused", "usageLimited"}
 _NON_RETRYABLE_GOAL_STATUSES = {"blocked", "budgetLimited", "complete"}
+_MAX_GENERATED_JSON_BLOCKED_RESUMES = 1
 _RETRYABLE_HTTP_STATUSES = {408, 409, 425, 429, 500, 502, 503, 504}
 _RETRYABLE_TEXT = re.compile(
     r"(?:\b(?:408|409|425|429|500|502|503|504)\b|"
     r"(?:rate|usage)[ -]?limit|server.?overload|temporar(?:y|ily) unavailable|"
     r"response stream (?:disconnected|connection failed)|connection (?:reset|closed|failed)|"
     r"transport closed|too many failed attempts|retry limit|timed? ?out)",
+    re.IGNORECASE,
+)
+_RECOVERABLE_GENERATED_JSON_TEXT = re.compile(
+    r"(?:unterminated string|jsondecodeerror|invalid json|malformed json|"
+    r"failed to (?:decode|parse)(?: [^\n]{0,40})? json|"
+    r"expecting (?:property name enclosed in double quotes|value|"
+    r"[,:'\"] delimiter)|"
+    r"(?:invalid|malformed) (?:tool|function)(?: call)? arguments?)",
     re.IGNORECASE,
 )
 
@@ -267,6 +276,7 @@ class CodexController:
         final_response: str | None = None
         usage: Any = None
         event_count = 0
+        generated_json_blocked_resumes = 0
         last_status: str | None = None
         last_error: Any = None
         current_goal: GoalState | None = None
@@ -348,7 +358,21 @@ class CodexController:
                 )
                 return result
 
-            if current_goal is not None and current_goal.status in _NON_RETRYABLE_GOAL_STATUSES:
+            generated_json_blocked = (
+                current_goal is not None
+                and current_goal.status == "blocked"
+                and _data_contains_recoverable_generated_json(last_error)
+            )
+            recoverable_blocked = (
+                generated_json_blocked
+                and generated_json_blocked_resumes
+                < _MAX_GENERATED_JSON_BLOCKED_RESUMES
+            )
+            if (
+                current_goal is not None
+                and current_goal.status in _NON_RETRYABLE_GOAL_STATUSES
+                and not recoverable_blocked
+            ):
                 result = self._goal_result(
                     current_goal,
                     resume_count,
@@ -366,6 +390,8 @@ class CodexController:
             retryable_stop = (
                 current_goal is not None and current_goal.status in _RETRYABLE_GOAL_STATUSES
             ) or self._is_retryable_error_payload(last_error) or caught_retryable_exception
+            if recoverable_blocked:
+                retryable_stop = True
             if current_goal is not None and current_goal.status == "active":
                 retryable_stop = True
 
@@ -408,6 +434,8 @@ class CodexController:
                 event_count,
             )
             self._check_resume_budget(resume_count, started_at, partial)
+            if recoverable_blocked:
+                generated_json_blocked_resumes += 1
             delay = self._retry_delay(resume_count)
             reason = self._retry_reason(current_goal, last_error)
             self._renderer.wrapper_event(
@@ -560,6 +588,12 @@ class CodexController:
 
     @staticmethod
     def _retry_reason(goal: GoalState | None, error: Any) -> str:
+        if (
+            goal is not None
+            and goal.status == "blocked"
+            and _data_contains_recoverable_generated_json(error)
+        ):
+            return "malformed generated JSON/tool arguments stopped the Goal"
         if goal is not None and goal.status == "usageLimited":
             return "Codex usage/rate limit stopped the Goal"
         if goal is not None and goal.status == "paused":
@@ -612,4 +646,16 @@ def _data_contains_http_status(value: Any, status: int) -> bool:
         )
     if isinstance(value, list):
         return any(_data_contains_http_status(item, status) for item in value)
+    return False
+
+
+def _data_contains_recoverable_generated_json(value: Any) -> bool:
+    if isinstance(value, dict):
+        return any(
+            _data_contains_recoverable_generated_json(item) for item in value.values()
+        )
+    if isinstance(value, list):
+        return any(_data_contains_recoverable_generated_json(item) for item in value)
+    if isinstance(value, str):
+        return bool(_RECOVERABLE_GENERATED_JSON_TEXT.search(value))
     return False
