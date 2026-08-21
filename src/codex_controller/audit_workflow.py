@@ -375,10 +375,16 @@ class VulnerabilityAuditWorkflow:
 
     def _attack_surface_spec(self) -> _TaskSpec:
         schema_hash = self._install_inventory_schema()
-        prompt = Template(
-            self._read_prompt(
-                "attack_surface_analysis_goal.txt", self.config.attack_surface_prompt
+        prompt_name = (
+            "attack_surface_cmake_analysis_goal.txt"
+            if _has_cmake_files(
+                project_dir=Path(self.config.project_dir),
+                output_dir=self.output_dir,
             )
+            else "attack_surface_analysis_goal.txt"
+        )
+        prompt = Template(
+            self._read_prompt(prompt_name, self.config.attack_surface_prompt)
         ).substitute(
             output_dir=self._project_prompt_path(self.output_dir),
             inventory_schema_path=self._project_prompt_path(
@@ -1331,6 +1337,47 @@ def _normalize_modules(
 
         modules.append(_ModuleRecord(name, is_high_risk, code_dir, reason, raw))
     return modules
+
+
+def _has_cmake_files(
+    *,
+    project_dir: Path,
+    output_dir: Path,
+) -> bool:
+    project_dir = project_dir.resolve()
+    output_dir = output_dir.resolve()
+
+    for root, directory_names, filenames in os.walk(
+        project_dir,
+        topdown=True,
+        followlinks=False,
+    ):
+        try:
+            current_dir = Path(root).resolve()
+        except (OSError, RuntimeError):
+            directory_names[:] = []
+            continue
+        retained_directories: list[str] = []
+        for directory_name in sorted(directory_names):
+            if directory_name == ".git":
+                continue
+            try:
+                candidate = (current_dir / directory_name).resolve()
+            except (OSError, RuntimeError):
+                continue
+            if candidate == output_dir or output_dir in candidate.parents:
+                continue
+            retained_directories.append(directory_name)
+        directory_names[:] = retained_directories
+
+        if any(
+            filename == "CMakeLists.txt"
+            or filename in {"CMakePresets.json", "CMakeUserPresets.json"}
+            or filename.endswith(".cmake")
+            for filename in filenames
+        ):
+            return True
+    return False
 
 
 def _slug(value: str | None) -> str:

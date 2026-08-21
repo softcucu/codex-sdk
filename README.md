@@ -265,7 +265,9 @@ except GoalResumeExhaustedError as exc:
 
 如果第一阶段此前已经由其他方式完成，可在合法的 `high_risk_modules.json` 旁创建一个空的 `ATTACK_SURFACE_COMPLETE.json`。工作流看到该文件后会跳过耗时的第一阶段；标志文件内容和哈希不参与判断，`high_risk_modules.json` 仍须通过严格校验。
 
-工作流会在第一阶段开始前将固定 JSON Schema 复制为 `protocol-analysis/inventory_schema.json`。第一阶段 Goal 从该文件读取 `module_record` 的严格字段契约，并只生成 `protocol-analysis/high_risk_modules.json`。该文件顶层是数组，每个模块严格包含 `name`、`is_high_risk`、`code_dir`、`reason`；非高风险模块的 `reason` 必须是 `null`。
+工作流会在第一阶段开始前检测仓库中是否存在 `CMakeLists.txt`、`*.cmake` 或 CMake preset。检测到 CMake 时使用专门的 CMake 提示词，由 Codex 自行读取构建文件、还原模块及父子关系，再判断各模块是否为外部高风险模块；未检测到时继续使用原有的目录递归分析提示词。
+
+工作流同时会将固定 JSON Schema 复制为 `protocol-analysis/inventory_schema.json`。两种提示词都从该文件读取 `module_record` 的严格字段契约，并只生成 `protocol-analysis/high_risk_modules.json`。该文件顶层是数组，每个模块严格包含 `name`、`is_high_risk`、`code_dir`、`reason`；非高风险模块的 `reason` 必须是 `null`。
 
 ```bash
 codex-vuln-audit \

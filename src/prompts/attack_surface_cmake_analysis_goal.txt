@@ -1,0 +1,56 @@
+/goal 基于当前代码仓的 CMake 构建关系梳理外部高风险模块。高风险模块必须在生产代码中处理来自系统外部、且攻击者可直接或间接控制的消息，攻击者能够通过该消息处理入口对模块发起攻击。
+
+## CMake 模块识别要求
+
+1. 递归查找并读取仓库中的 `CMakeLists.txt`、被其 `include()` 的 `*.cmake` 文件以及可帮助理解构建入口的 CMake preset。
+2. 由你根据 CMake 语义确定模块，不要让目录扫描结果直接替你决定模块。重点分析 `project()`、`add_subdirectory()`、`include()`、`add_library()`、`add_executable()`、target 依赖和源码归属，还原实际参与生产构建的父子模块关系。
+3. 将拥有独立 `CMakeLists.txt`、并由该构建文件定义或组织生产代码的组件作为最小模块边界；不得把多个这样的组件粗略合并成一个大目录模块，也不要把纯聚合构建文件误判成有独立生产逻辑的高风险模块。
+4. 模块的 `name` 应尽量体现 CMake 父子层级或 target 身份，`code_dir` 指向该模块的代码目录。测试、示例、benchmark、构建产物和纯第三方依赖不得冒充仓库自身的生产模块。
+5. CMake 只用于确定模块边界和关系，不能作为风险证据；每个模块是否高风险仍必须从真实生产代码的外部消息处理路径确认。
+
+## 风险判定要求
+
+1. 必须从生产代码确认模块是否接收并处理外部消息，不得只根据 target 名、目录名、README、注释、测试或接口定义判断。
+2. `is_high_risk=true` 必须同时满足：模块存在外部消息处理入口；消息可由攻击者直接或间接控制；消息能够到达该模块的生产处理代码。
+3. 仅发送消息、仅处理内部可信数据、仅包含消息定义，或没有外部可达处理路径的模块，必须标为非高风险。
+4. 高风险模块的 `reason` 应简要写明外部消息来源、处理入口和攻击者可达性。
+
+## 输出文件目录约束
+
+- 只允许创建或修改 `${output_dir}/high_risk_modules.json`，不得修改仓库源码、配置、测试或其他分析结果。
+- `${output_dir}` 已由外部工作流创建；不要在其他目录写临时结果。
+- `code_dir` 是相对于代码仓根目录的目录路径，不是相对于 `${output_dir}` 的路径。
+
+## JSON 约束
+
+写入前读取 `${inventory_schema_path}`。`high_risk_modules.json` 必须是 UTF-8 编码的合法 JSON，顶层必须是数组；不得使用 JSONL、Markdown fence、注释或尾随逗号。数组每个元素代表一个模块，并且只能包含以下四个字段：
+
+```json
+[
+  {
+    "name": "server/network",
+    "is_high_risk": true,
+    "code_dir": "src/network",
+    "reason": "处理攻击者可控的网络请求，请求经解析入口进入该模块"
+  },
+  {
+    "name": "server/internal",
+    "is_high_risk": false,
+    "code_dir": "src/internal",
+    "reason": null
+  }
+]
+```
+
+字段规则：
+
+- `name`：非空字符串，在数组中唯一。
+- `is_high_risk`：JSON 布尔值，只能是 `true` 或 `false`，不得写成字符串或数字。
+- `code_dir`：非空字符串，在数组中唯一；必须使用 `/` 分隔的规范仓库相对目录，仓库根目录写 `.`；不得使用绝对路径、`./` 前缀、`..`、反斜杠或指向文件的路径。
+- `reason`：当 `is_high_risk=true` 时必须是非空字符串，并说明处理的外部消息及攻击路径；当 `is_high_risk=false` 时必须严格为 JSON `null`。
+- 所有对象禁止额外字段。不得遗漏非高风险模块，不得只输出高风险模块。
+
+## 完成条件
+
+1. 已根据 CMake 构建图识别生产模块及父子关系，并检查所有 CMake 生产模块的外部消息处理风险；
+2. `${output_dir}/high_risk_modules.json` 已按上述目录及 JSON 约束生成，并符合 `${inventory_schema_path}`。

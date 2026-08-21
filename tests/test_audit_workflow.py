@@ -230,6 +230,42 @@ def test_attack_surface_schema_is_installed_before_bounded_goal_is_created(
     assert "module_record" in schema["$defs"]
     assert "high_risk_modules.json" in spec.objective
     assert "只能包含以下四个字段" in spec.objective
+    assert "CMake 构建关系" not in spec.objective
+
+
+@pytest.mark.parametrize(
+    "cmake_file",
+    ["CMakeLists.txt", "cmake/toolchain.cmake", "CMakePresets.json"],
+)
+def test_cmake_related_file_selects_cmake_attack_surface_prompt(
+    tmp_path: Path,
+    cmake_file: str,
+) -> None:
+    path = tmp_path / cmake_file
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("# cmake\n", encoding="utf-8")
+
+    active = workflow(tmp_path)
+    spec = active._attack_surface_spec()
+
+    assert "CMake 构建关系" in spec.objective
+    assert "由你根据 CMake 语义确定模块" in spec.objective
+    assert "add_subdirectory" in spec.objective
+    assert "只能包含以下四个字段" in spec.objective
+    assert len(spec.objective) <= 4000
+
+
+def test_cmake_files_inside_analysis_output_do_not_select_cmake_prompt(
+    tmp_path: Path,
+) -> None:
+    generated = tmp_path / "protocol-analysis" / "generated"
+    generated.mkdir(parents=True)
+    (generated / "CMakeLists.txt").write_text("# generated\n", encoding="utf-8")
+    active = workflow(tmp_path)
+
+    spec = active._attack_surface_spec()
+
+    assert "CMake 构建关系" not in spec.objective
 
 
 def test_empty_manual_attack_surface_marker_skips_expensive_first_stage(
