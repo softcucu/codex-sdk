@@ -18,7 +18,7 @@ from .render import EventRenderer
 
 _RETRYABLE_GOAL_STATUSES = {"paused", "usageLimited"}
 _NON_RETRYABLE_GOAL_STATUSES = {"blocked", "budgetLimited", "complete"}
-_MAX_GENERATED_JSON_BLOCKED_RESUMES = 1
+_MAX_GENERATED_JSON_BLOCKED_RESUMES = 2
 _RETRYABLE_HTTP_STATUSES = {408, 409, 425, 429, 500, 502, 503, 504}
 _RETRYABLE_TEXT = re.compile(
     r"(?:\b(?:408|409|425|429|500|502|503|504)\b|"
@@ -650,6 +650,10 @@ def _data_contains_http_status(value: Any, status: int) -> bool:
 
 
 def _data_contains_recoverable_generated_json(value: Any) -> bool:
+    if not isinstance(value, (dict, list, str)):
+        data = model_to_data(value)
+        if data is not value:
+            return _data_contains_recoverable_generated_json(data)
     if isinstance(value, dict):
         return any(
             _data_contains_recoverable_generated_json(item) for item in value.values()

@@ -149,9 +149,12 @@ class FakeBackend:
 
 
 class MalformedJsonBlockedBackend(FakeBackend):
-    def __init__(self, *, repeat_on_resume: bool = False) -> None:
+    def __init__(
+        self, *, repeat_on_resume: bool = False, object_error: bool = False
+    ) -> None:
         super().__init__(first_status="blocked")
         self.repeat_on_resume = repeat_on_resume
+        self.object_error = object_error
 
     def start_goal(
         self, objective: str, token_budget: int | None, model: str | None
@@ -173,25 +176,70 @@ class MalformedJsonBlockedBackend(FakeBackend):
         return self._malformed_operation("turn-2")
 
     def _malformed_operation(self, turn_id: str) -> Operation:
-        error = {
+        error_data = {
             "message": (
-                '{"error":"Unterminated string starting at : line 1 column 8 '
-                '(char 7)","type":"BadRequestError","code":400}'
+                '{"error":{"message":"Unterminated string starting at line 1 '
+                'column 8 (char 7)","type":"BadRequestError","param":null,'
+                '"code":400}}'
             ),
             "type": "invalid_request_error",
+            "param": "",
             "code": None,
         }
+        if self.object_error:
+            error = _ModelError(error_data)
+            error_payload: Any = _ErrorPayload(turn_id, error)
+            completed_payload: Any = _TurnCompletedPayload(turn_id, error)
+        else:
+            error = error_data
+            error_payload = {"turnId": turn_id, "error": error, "willRetry": False}
+            completed_payload = {
+                "turn": {"id": turn_id, "status": "failed", "error": error}
+            }
         events = [
-            Notification(
-                "error",
-                {"turnId": turn_id, "error": error, "willRetry": False},
-            ),
-            Notification(
-                "turn/completed",
-                {"turn": {"id": turn_id, "status": "failed", "error": error}},
-            ),
+            Notification("error", error_payload),
+            Notification("turn/completed", completed_payload),
         ]
         return Operation(turn_id, iter(events), self._cancel)
+
+
+class _ModelError:
+    def __init__(self, data: dict[str, Any]) -> None:
+        self.data = data
+
+    def model_dump(self, **_options: Any) -> dict[str, Any]:
+        return self.data
+
+
+class _ErrorPayload:
+    def __init__(self, turn_id: str, error: _ModelError) -> None:
+        self.turn_id = turn_id
+        self.error = error
+
+    def model_dump(self, **_options: Any) -> dict[str, Any]:
+        return {
+            "turnId": self.turn_id,
+            "error": self.error.model_dump(),
+            "willRetry": False,
+        }
+
+
+class _Turn:
+    def __init__(self, turn_id: str, error: _ModelError) -> None:
+        self.id = turn_id
+        self.status = "failed"
+        self.error = error
+
+    def model_dump(self, **_options: Any) -> dict[str, Any]:
+        return {"id": self.id, "status": self.status, "error": self.error.model_dump()}
+
+
+class _TurnCompletedPayload:
+    def __init__(self, turn_id: str, error: _ModelError) -> None:
+        self.turn = _Turn(turn_id, error)
+
+    def model_dump(self, **_options: Any) -> dict[str, Any]:
+        return {"turn": self.turn.model_dump()}
 
 
 class DisconnectingBackend(FakeBackend):

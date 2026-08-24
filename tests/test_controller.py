@@ -186,7 +186,24 @@ def test_blocked_goal_resumes_after_generated_tool_json_parse_error() -> None:
     assert "malformed generated JSON/tool arguments" in output.getvalue()
 
 
-def test_repeated_generated_tool_json_error_stops_after_one_automatic_resume() -> None:
+def test_model_error_payload_recovers_from_generated_tool_json_parse_error() -> None:
+    backend = MalformedJsonBlockedBackend(object_error=True)
+    controller = CodexController(
+        _backend=backend,
+        output=io.StringIO(),
+        output_mode="quiet",
+        resume_policy=no_delay_policy(),
+    )
+
+    result = controller.goal("recover SDK model error payload")
+
+    assert result.completed
+    assert result.resume_count == 1
+    assert backend.start_goal_calls == 1
+    assert backend.resume_goal_calls == 1
+
+
+def test_repeated_generated_tool_json_error_stops_after_bounded_resumes() -> None:
     backend = MalformedJsonBlockedBackend(repeat_on_resume=True)
     controller = CodexController(
         _backend=backend,
@@ -199,9 +216,9 @@ def test_repeated_generated_tool_json_error_stops_after_one_automatic_resume() -
 
     assert not result.completed
     assert result.goal.status == "blocked"
-    assert result.resume_count == 1
+    assert result.resume_count == 2
     assert backend.start_goal_calls == 1
-    assert backend.resume_goal_calls == 1
+    assert backend.resume_goal_calls == 2
 
 
 def test_transport_close_reconnects_then_resumes_existing_goal() -> None:
