@@ -32,6 +32,8 @@ from .controller import CodexController
 
 
 _STATE_SCHEMA_VERSION = 1
+_MAX_GOAL_OBJECTIVE_CHARS = 4000
+_GOAL_OBJECTIVE_PREVIEW_CHARS = 1000
 _TERMINAL_GOAL_FAILURES = {"blocked", "budgetLimited"}
 _REVIEW_VERDICT_MAP = {
     "problem": "confirmed",
@@ -298,6 +300,7 @@ class CodeQLGitAuditWorkflow:
         self.confirmed_dir = self.output_dir / "confirmed"
         self.workflow_dir = self.output_dir / ".workflow"
         self.logs_dir = self.workflow_dir / "logs"
+        self.goal_prompts_dir = self.workflow_dir / "goal-prompts"
         self.state_path = self.workflow_dir / "state.json"
         self.lock_path = self.workflow_dir / "workflow.lock"
         self.summary_path = self.output_dir / "SUMMARY.md"
@@ -448,6 +451,7 @@ class CodeQLGitAuditWorkflow:
             self.reviews_dir,
             self.confirmed_dir,
             self.logs_dir,
+            self.goal_prompts_dir,
         ):
             directory.mkdir(parents=True, exist_ok=True)
 
@@ -1569,7 +1573,7 @@ class CodeQLGitAuditWorkflow:
         validate: Callable[[], Any],
         force: bool,
     ) -> None:
-        objective = _goal_objective(objective)
+        objective = self._dispatchable_goal_objective(task_id, objective)
         objective_hash = hashlib.sha256(objective.encode("utf-8")).hexdigest()
         if not force:
             try:
@@ -1660,6 +1664,35 @@ class CodeQLGitAuditWorkflow:
         raise CodeQLAuditWorkflowError(
             f"Goal {task_id} exhausted retries: {execution_error or 'unknown failure'}"
         )
+
+    def _dispatchable_goal_objective(self, task_id: str, prompt: str) -> str:
+        objective = _goal_objective(prompt)
+        if len(objective) <= _MAX_GOAL_OBJECTIVE_CHARS:
+            return objective
+
+        prompt_hash = hashlib.sha256(objective.encode("utf-8")).hexdigest()
+        prompt_path = self.goal_prompts_dir / f"{_safe_name(task_id)}.md"
+        _atomic_text(prompt_path, objective + "\n")
+        preview = ""
+        for paragraph in objective.split("\n\n"):
+            candidate = f"{preview}\n\n{paragraph}" if preview else paragraph
+            if len(candidate) > _GOAL_OBJECTIVE_PREVIEW_CHARS:
+                break
+            preview = candidate
+        if not preview:
+            preview = objective[: _GOAL_OBJECTIVE_PREVIEW_CHARS - 3] + "..."
+        dispatched = (
+            f"{preview}\n\n"
+            f"完整任务说明（SHA-256 `{prompt_hash}`）位于 "
+            f"`{self._project_path(prompt_path)}`。先完整读取该 UTF-8 文件，再严格执行"
+            "其中全部要求；该说明文件只读，不得修改。"
+        )
+        if len(dispatched) > _MAX_GOAL_OBJECTIVE_CHARS:
+            raise CodeQLAuditWorkflowError(
+                f"Goal {task_id} objective indirection is {len(dispatched)} characters; "
+                f"maximum is {_MAX_GOAL_OBJECTIVE_CHARS}"
+            )
+        return dispatched
 
     def _goal_task_snapshot(self, task_id: str) -> dict[str, Any]:
         with self._state_lock:

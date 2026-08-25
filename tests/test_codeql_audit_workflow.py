@@ -59,6 +59,7 @@ class GoalOnlyController:
 
     def goal(self, objective: str, **_kwargs: Any) -> Any:
         assert not objective.lstrip().startswith("/goal")
+        assert len(objective) <= 4000
         if "审计 Git 提交" in objective:
             type(self).calls.append("history")
             type(self).history_started.set()
@@ -485,10 +486,13 @@ def test_first_ready_rule_scans_before_history_goal_completes(tmp_path: Path) ->
 
 def test_program_dispatches_one_goal_per_git_commit(tmp_path: Path) -> None:
     commits = ["c" * 40, "b" * 40, "a" * 40]
+    dispatched_objectives: list[str] = []
 
     class PerCommitController(GoalOnlyController):
         def goal(self, objective: str, **_kwargs: Any) -> Any:
             assert not objective.lstrip().startswith("/goal")
+            assert len(objective) <= 4000
+            dispatched_objectives.append(objective)
             commit_match = re.search(r"Git 提交 `([0-9a-f]+)`", objective)
             head_match = re.search(r"基线 HEAD 为 `([0-9a-f]+)`", objective)
             assert commit_match is not None
@@ -565,6 +569,23 @@ def test_program_dispatches_one_goal_per_git_commit(tmp_path: Path) -> None:
         / "git_history_codeql_rules_goal.txt"
     ).read_text(encoding="utf-8")
     assert prompt.startswith("/goal ")
+    assert len(prompt) > 4000
+    assert all(".workflow/goal-prompts/" in item for item in dispatched_objectives)
+    saved_prompts = sorted(
+        (tmp_path / "codeql-git-audit" / ".workflow" / "goal-prompts").glob(
+            "git-commit--*.md"
+        )
+    )
+    assert len(saved_prompts) == len(commits)
+    assert all(len(path.read_text(encoding="utf-8")) > 4000 for path in saved_prompts)
+    assert all(
+        not path.read_text(encoding="utf-8").lstrip().startswith("/goal")
+        for path in saved_prompts
+    )
+    assert all(
+        path.read_text(encoding="utf-8").rstrip().endswith("任务才算完成。")
+        for path in saved_prompts
+    )
 
 
 def test_rule_cannot_scan_when_positive_negative_codeql_test_fails(

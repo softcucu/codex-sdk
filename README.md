@@ -314,7 +314,7 @@ print(result.status, result.results_dir)
 
 CMake 仓库沿用 `codeql_cmake_split_db_semantic_v4.py` 的 target、依赖和 include 闭包分片。没有 CMake 时，工作流识别 Make、Meson、Bazel、Autotools、SCons、qmake 等构建描述文件所在目录，再结合源码目录归属与仓库内 `#include` 闭包生成分片。当前数据库分片器面向 CodeQL 的 `c-cpp` language。
 
-所有大模型任务均通过 `CodexController.goal()` 执行：每条 Git commit 对应一个独立可恢复 Goal，每条去重后的疑似问题也对应一个独立可恢复 Goal。程序预先创建共享 `qlpack.yml`，commit Goal 只写自己唯一命名的报告、查询、query tests 和 ready marker，因此可以安全并发。提示词文件以 `/goal` 开头，调度器在调用 `CodexController.goal()` 前剥离命令前缀，避免把 CLI 命令文本嵌入 objective。CodeQL 建库和扫描本身不调用大模型。
+所有大模型任务均通过 `CodexController.goal()` 执行：每条 Git commit 对应一个独立可恢复 Goal，每条去重后的疑似问题也对应一个独立可恢复 Goal。程序预先创建共享 `qlpack.yml`，commit Goal 只写自己唯一命名的报告、查询、query tests 和 ready marker，因此可以安全并发。提示词文件以 `/goal` 开头，调度器在调用 `CodexController.goal()` 前剥离命令前缀，避免把 CLI 命令文本嵌入 objective。渲染后的完整说明超过 Goal 的 4000 字符限制时，程序会把它保存到 `.workflow/goal-prompts/`，并提交一个包含说明文件路径及内容哈希的短 objective。CodeQL 建库和扫描本身不调用大模型。
 
 规则发布存在硬性测试门槛。每条规则必须提供独立 `query-tests/<commit>-<rule>/`，其中至少包含一个相似漏洞正例、一个带关键安全约束的负例、`test.qlref` 和 `test.expected`。commit Goal 必须先实际运行 `codeql test run`；ready marker 发布后，外部调度器还会再次运行测试。只有正例命中、负例不命中且命令退出码为 `0`，规则才会进入分片数据库扫描。仅在 JSON 中声称测试通过无效。
 
@@ -347,7 +347,7 @@ codeql-git-audit/
 ├── findings/             # 送交模型确认的规范化疑似问题
 ├── reviews/              # 每条疑似问题的完整审计 JSON
 ├── confirmed/            # 已确认为真实问题的审计 JSON
-├── .workflow/            # Goal thread、重试和恢复状态
+├── .workflow/            # Goal thread、重试、恢复状态及超长 Goal 的完整说明文件
 └── SUMMARY.md
 ```
 
