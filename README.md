@@ -303,6 +303,74 @@ result = VulnerabilityAuditWorkflow(config).run()
 print(result.status, result.results_dir)
 ```
 
+## Git 历史驱动的 CodeQL 审计工作流
+
+`codex-codeql-git-audit` 是独立于上述 DoS 审计的第二套工作流，按以下流水线运行：
+
+1. 对 C/C++ 仓库做语义分片并创建多个 CodeQL `build-mode=none` 数据库；
+2. 程序同时用 `git rev-list` 枚举提交，并把每条 commit 分配给一个独立 Codex Goal；该 Goal 只判断这一条提交是否为安全漏洞修复，若包含一个或多个漏洞则分别分析、生成 `.ql`，并为每条规则建立至少一个预期命中的相似漏洞正例和一个预期不命中的安全负例；
+3. CodeQL 数据库阶段完成后，只要任一 commit Goal 发布第一条 ready rule 且程序二次运行正反例测试通过，就立即开始扫描，不等待其他 commit Goal 或其他规则完成；后续合格规则自动追加“数据库 × 规则”扫描；
+4. 任一扫描的 SARIF 一产生，就立即将其中去重后的疑似问题交给独立 Codex Goal 做源码路径确认，不等待其他扫描结束。
+
+CMake 仓库沿用 `codeql_cmake_split_db_semantic_v4.py` 的 target、依赖和 include 闭包分片。没有 CMake 时，工作流识别 Make、Meson、Bazel、Autotools、SCons、qmake 等构建描述文件所在目录，再结合源码目录归属与仓库内 `#include` 闭包生成分片。当前数据库分片器面向 CodeQL 的 `c-cpp` language。
+
+所有大模型任务均通过 `CodexController.goal()` 执行：每条 Git commit 对应一个独立可恢复 Goal，每条去重后的疑似问题也对应一个独立可恢复 Goal。程序预先创建共享 `qlpack.yml`，commit Goal 只写自己唯一命名的报告、查询、query tests 和 ready marker，因此可以安全并发。提示词文件以 `/goal` 开头，调度器在调用 `CodexController.goal()` 前剥离命令前缀，避免把 CLI 命令文本嵌入 objective。CodeQL 建库和扫描本身不调用大模型。
+
+规则发布存在硬性测试门槛。每条规则必须提供独立 `query-tests/<commit>-<rule>/`，其中至少包含一个相似漏洞正例、一个带关键安全约束的负例、`test.qlref` 和 `test.expected`。commit Goal 必须先实际运行 `codeql test run`；ready marker 发布后，外部调度器还会再次运行测试。只有正例命中、负例不命中且命令退出码为 `0`，规则才会进入分片数据库扫描。仅在 JSON 中声称测试通过无效。
+
+默认分析 HEAD 可达的全部提交，并确认全部疑似问题。大型仓库可用 `--history-workers` 控制并发 commit Goal 数量、用 `--history-max-commits` 只分析最新 N 条提交；`--max-findings` 和 `--max-findings-per-rule` 用于限制确认成本。
+
+```bash
+codex-codeql-git-audit \
+  -C /path/to/target-repository \
+  --codeql /path/to/codeql \
+  --model your-codex-model \
+  --history-workers 4 \
+  --scan-workers 2 \
+  --review-workers 4
+```
+
+也可从源码树直接启动：
+
+```bash
+PYTHONPATH=src .venv/bin/python codeql_git_history_audit_workflow.py \
+  -C /path/to/target-repository
+```
+
+默认产物位于目标仓的 `codeql-git-audit/`：
+
+```text
+codeql-git-audit/
+├── database-stage/       # manifest、filelists 和分片 CodeQL 数据库
+├── history-analysis/     # commits/、queries/、query-tests/、ready-rules/、patterns.json
+├── scans/                # 每个“数据库 × 规则”的 SARIF 与扫描完成元数据
+├── findings/             # 送交模型确认的规范化疑似问题
+├── reviews/              # 每条疑似问题的完整审计 JSON
+├── confirmed/            # 已确认为真实问题的审计 JSON
+├── .workflow/            # Goal thread、重试和恢复状态
+└── SUMMARY.md
+```
+
+重复运行会在 Git HEAD 与分片参数未变化时复用合法数据库、规则、SARIF 和已校验 review；`--force` 会启动新一代任务并重跑。只有未提交改动发生变化而 HEAD 不变时，也应使用 `--force`。历史中没有足够证据生成可靠规则时，Goal 可以输出空规则集，此时工作流会正常完成而不会虚构规则。扫描或个别确认失败时状态为 `partial`、退出码为 `2`；前置建库或历史规则阶段失败时状态为 `failed`、退出码为 `1`。
+
+Python API：
+
+```python
+from codex_controller import CodeQLAuditWorkflowConfig, CodeQLGitAuditWorkflow
+
+
+result = CodeQLGitAuditWorkflow(
+    CodeQLAuditWorkflowConfig(
+        project_dir="/path/to/target-repository",
+        model="your-codex-model",
+        history_workers=4,
+        scan_workers=2,
+        review_workers=4,
+    )
+).run()
+print(result.status, result.confirmed_total, result.output_dir)
+```
+
 ## 线程和 Goal 控制 API
 
 ```python

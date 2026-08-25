@@ -1,0 +1,151 @@
+/goal 审计 Git 提交 `${commit}`，判断它是否与安全漏洞修复相关；本任务只能把这一条提交作为候选提交，不得顺带审计其他提交。
+
+当前仓库分析基线 HEAD 为 `${git_head}`。程序已经明确选择 `${commit}` 并为本任务预装 CodeQL C/C++ query pack。你可以读取该提交的父提交、相关源码、测试和 blame 来理解 diff，但最终结论必须针对 `${commit}`。
+
+## 判断标准
+
+1. 使用 `git show --stat ${commit}`、`git show ${commit}` 及必要的父版本对比，实质阅读修复前后代码。提交标题、issue/CVE 编号、测试名和注释只能用于定位，不能替代代码证据。
+2. `security_fix` 表示 diff 修复了攻击者可触达的机密性、完整性、可用性、权限边界或内存安全问题。普通重构、单纯功能修正、只影响测试/debug、不可外部触达的崩溃不得误判为安全修复。
+3. 如果一条提交同时修复多个不同根因或攻击路径，必须分别列出多个 vulnerability；不得粗略合并。
+4. 每个 vulnerability 必须说明修复前的缺陷、攻击者输入或权限、完整触发路径、安全影响，以及 diff 中新增或改变的安全约束。
+5. 每个确认的 vulnerability 至少生成一条可运行的 CodeQL 规则。规则应泛化“缺陷数据流/控制流 + 缺失约束 + 危险结果”，同时用本仓库 API、类型、调用关系或数据流限制噪声，不能只搜索文本或把单个旧函数名硬编码成全部逻辑。
+6. 无法从代码证明安全相关时使用 `not_security_fix`；提交可能安全相关但仓库内证据不足时使用 `inconclusive`。不得为凑规则虚构漏洞。
+
+## 唯一写入范围
+
+只允许创建或修改以下文件：
+
+- 本提交最终结论：`${commit_report_path}`
+- 本提交查询：`${queries_dir}/${commit}-*.ql`
+- 本提交查询测试：`${query_tests_dir}/${commit}-*/**`
+- 本提交规则发布标志：`${ready_rules_dir}/${commit}-*.json`
+
+不得修改 `${output_dir}/qlpack.yml`，它由程序统一管理；不得修改源码、配置、测试、其他提交的结果或 `${output_dir}` 外的文件。
+
+## CodeQL 规则要求
+
+- 查询使用 C/C++ CodeQL 标准库，包含标准元数据、完整的 `from`/`where`/`select`。
+- `@kind` 必须为 `problem`，并设置合理的 `@problem.severity`、`@precision` 和 `@tags`。
+- `@id` 必须与 JSON pattern 的 `id` 完全相同，并以 `local/git-commit/${commit}/` 开头。
+- `query_path` 是相对 `${output_dir}` 的路径，格式为 `queries/${commit}-<slug>.ql`。
+- `evidence_commits` 必须包含且只能引用真实证据提交；其中必须包含 `${commit}`。
+
+## 相似漏洞正反例测试（规则完成硬门槛）
+
+每条规则必须拥有独立目录 `${query_tests_dir}/${commit}-<slug>/`，至少包含：
+
+- `positive.cpp`：与历史漏洞根因和调用形态相似、预期必须命中的有漏洞代码；
+- `negative.cpp`：结构尽量与正例相同，但包含关键安全校验或安全用法、预期不得命中的无漏洞代码；
+- `test.qlref`：引用本规则 `.ql`；
+- `test.expected`：只包含正例的预期结果，不得包含负例结果。
+
+正例和负例必须真正体现该提交修复的语义差异，不能使用无关函数名、注释文本、永真/永假条件或专门迎合查询的假模式。至少各一个正例和负例；复杂规则应增加边界变体。
+
+规则写完后必须实际运行：
+
+```text
+${codeql_executable} test run <该规则测试目录> --search-path=${output_dir}
+```
+
+如果测试失败，继续修改查询或 fixture 并重复运行，直到正例命中、负例不命中且命令退出码为 0。不得伪造测试输出、不得仅在 JSON 中声称测试通过。外部调度器在接受 ready rule 前会再次执行相同测试；二次测试不通过的规则不会进入数据库扫描。
+
+## 流式发布顺序
+
+对于每条完成的规则，严格按以下顺序操作：
+
+1. 先完整写入 `.ql` 查询和该规则的正例、负例、`test.qlref`、`test.expected`；
+2. 实际运行 `codeql test run`，失败则修正规则或测试并重跑；
+3. 测试退出码为 0 后，确认查询和测试文件均已完成，此后不得再修改；
+4. 再写入唯一的 ready rule，例如 `${ready_rules_dir}/${commit}-001.json`；
+5. ready 文件写完后，外部程序会二次运行测试，通过后立即开始扫描；本 Goal 可以继续分析本提交中的下一个漏洞或规则；
+6. 所有规则均发布后，最后写 `${commit_report_path}`。报告中的规则必须与已经发布的 ready rules 完全一致。
+
+ready rule 格式：
+
+```json
+{
+  "schema_version": 1,
+  "status": "ready",
+  "git_head": "${git_head}",
+  "source_commit": "${commit}",
+  "pattern": {
+    "id": "local/git-commit/${commit}/unchecked-length",
+    "name": "Unchecked attacker-controlled length",
+    "description": "历史 diff 证明的缺陷模式、缺失约束和安全影响",
+    "query_path": "queries/${commit}-unchecked-length.ql",
+    "severity": "error",
+    "precision": "high",
+    "evidence_commits": ["${commit}"],
+    "evidence": [
+      {
+        "commit": "${commit}",
+        "path": "仓库相对路径",
+        "symbols": ["相关符号"],
+        "reason": "修复前后 diff 如何证明该模式"
+      }
+    ],
+    "tests": {
+      "test_path": "query-tests/${commit}-unchecked-length",
+      "positive_cases": ["positive.cpp"],
+      "negative_cases": ["negative.cpp"]
+    }
+  }
+}
+```
+
+## 提交结论文件
+
+`${commit_report_path}` 必须是 UTF-8 合法 JSON，不能包含 Markdown fence、注释或尾随逗号：
+
+```json
+{
+  "schema_version": 1,
+  "git_head": "${git_head}",
+  "commit": "${commit}",
+  "verdict": "security_fix",
+  "summary": "该提交是否修复安全漏洞及判断理由",
+  "vulnerabilities": [
+    {
+      "id": "本提交内唯一的漏洞编号",
+      "title": "漏洞名称",
+      "summary": "修复前根因和修复内容",
+      "security_impact": "攻击者可达性和安全影响",
+      "evidence": [
+        {
+          "path": "仓库相对路径",
+          "symbol": "代码符号",
+          "before": "修复前行为",
+          "after": "修复后约束",
+          "reason": "安全意义"
+        }
+      ],
+      "rules": [
+        {
+          "id": "local/git-commit/${commit}/unchecked-length",
+          "name": "Unchecked attacker-controlled length",
+          "description": "可泛化漏洞模式",
+          "query_path": "queries/${commit}-unchecked-length.ql",
+          "severity": "error",
+          "precision": "high",
+          "evidence_commits": ["${commit}"],
+          "evidence": [
+            {
+              "commit": "${commit}",
+              "path": "仓库相对路径",
+              "symbols": ["相关符号"],
+              "reason": "diff 证据"
+            }
+          ],
+          "tests": {
+            "test_path": "query-tests/${commit}-unchecked-length",
+            "positive_cases": ["positive.cpp"],
+            "negative_cases": ["negative.cpp"]
+          }
+        }
+      ]
+    }
+  ]
+}
+```
+
+`verdict` 只能是 `security_fix`、`not_security_fix`、`inconclusive`。后两种 verdict 的 `vulnerabilities` 必须是空数组，且不得创建本提交的 `.ql` 或 ready rule。只有完成单提交判断、按顺序发布全部规则并写入 `${commit_report_path}` 后任务才算完成。

@@ -12,6 +12,15 @@ from .audit_workflow import (
     VulnerabilityAuditWorkflow,
 )
 from .config import ControllerConfig, OutputMode, ResumePolicy, resolve_codex_bin
+from .codeql_audit_workflow import (
+    CodeQLAuditAlreadyRunningError,
+    CodeQLAuditOutputValidationError,
+    CodeQLAuditStatus,
+    CodeQLAuditWorkflowConfig,
+    CodeQLAuditWorkflowError,
+    CodeQLAuditWorkflowResult,
+    CodeQLGitAuditWorkflow,
+)
 from .controller import CodexController
 from .errors import (
     CodexControllerError,
@@ -33,6 +42,13 @@ __all__ = [
     "AuditWorkflowError",
     "AuditWorkflowAlreadyRunningError",
     "AuditOutputValidationError",
+    "CodeQLAuditWorkflowConfig",
+    "CodeQLAuditWorkflowResult",
+    "CodeQLAuditStatus",
+    "CodeQLGitAuditWorkflow",
+    "CodeQLAuditWorkflowError",
+    "CodeQLAuditAlreadyRunningError",
+    "CodeQLAuditOutputValidationError",
     "CodexController",
     "ControllerConfig",
     "OutputMode",

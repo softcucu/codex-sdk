@@ -23,12 +23,14 @@ dev = [
 [project.scripts]
 codex-goal = "codex_controller.cli:main"
 codex-vuln-audit = "codex_controller.audit_cli:main"
+codex-codeql-git-audit = "codex_controller.codeql_audit_cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/codex_controller"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "src/prompts" = "codex_controller/prompts"
+"codeql_cmake_split_db_semantic_v4.py" = "codex_controller/codeql_cmake_split_db_semantic_v4.py"
 
 [tool.pytest.ini_options]
 addopts = "-q"
