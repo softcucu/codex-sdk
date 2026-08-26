@@ -36,7 +36,7 @@
 
 - `positive.cpp`：与历史漏洞根因和调用形态相似、预期必须命中的有漏洞代码；
 - `negative.cpp`：结构尽量与正例相同，但包含关键安全校验或安全用法、预期不得命中的无漏洞代码；
-- `test.qlref`：引用本规则 `.ql`；
+- `test.qlref`：内容必须是查询相对 query pack 根目录 `${output_dir}` 的路径，即与 JSON 的 `query_path` 完全一致，例如 `queries/${commit}-<slug>.ql`，不得写成相对测试目录的 `../../queries/...`；
 - `test.expected`：只包含正例的预期结果，不得包含负例结果。
 
 正例和负例必须真正体现该提交修复的语义差异，不能使用无关函数名、注释文本、永真/永假条件或专门迎合查询的假模式。至少各一个正例和负例；复杂规则应增加边界变体。
@@ -44,7 +44,7 @@
 规则写完后必须实际运行：
 
 ```text
-${codeql_executable} test run <该规则测试目录> --search-path=${output_dir}
+${codeql_executable} test run <该规则测试目录>/test.qlref --search-path=${output_dir}
 ```
 
 如果测试失败，继续修改查询或 fixture 并重复运行，直到正例命中、负例不命中且命令退出码为 0。不得伪造测试输出、不得仅在 JSON 中声称测试通过。外部调度器在接受 ready rule 前会再次执行相同测试；二次测试不通过的规则不会进入数据库扫描。

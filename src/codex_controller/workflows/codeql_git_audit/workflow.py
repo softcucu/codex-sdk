@@ -775,6 +775,7 @@ class CodeQLGitAuditWorkflow:
             self.history_dir / "qlpack.yml",
             "name: local/git-history-audit\n"
             "version: 0.0.1\n"
+            "extractor: cpp\n"
             "dependencies:\n"
             '  codeql/cpp-all: "*"\n',
         )
@@ -905,7 +906,6 @@ class CodeQLGitAuditWorkflow:
                 raise CodeQLAuditOutputValidationError(
                     f"rule {rule.rule_id} does not cite its source commit {commit}"
                 )
-            self._ensure_rule_tests_pass(rule)
             canonical = dict(published_rule.raw_pattern)
             rules.append(rule)
             raw_patterns.append(canonical)
@@ -1004,6 +1004,10 @@ class CodeQLGitAuditWorkflow:
             if "codeql/cpp-all" not in qlpack_text:
                 raise CodeQLAuditOutputValidationError(
                     "qlpack.yml must depend on codeql/cpp-all"
+                )
+            if not _declares_cpp_extractor(qlpack_text):
+                raise CodeQLAuditOutputValidationError(
+                    "qlpack.yml must declare extractor: cpp for query tests"
                 )
 
         rules: list[_Rule] = []
@@ -1111,7 +1115,11 @@ class CodeQLGitAuditWorkflow:
             raise CodeQLAuditOutputValidationError(
                 f"query tests for {rule_id} require test.expected"
             )
-        expected_qlref = query_relative.as_posix()
+        # A .qlref is relative to the root of the pack containing the query,
+        # not to the test directory or the process working directory.
+        expected_qlref = query_path.relative_to(
+            self.history_dir.resolve()
+        ).as_posix()
         with self._rule_test_lock:
             try:
                 qlref_text = qlref_path.read_text(encoding="utf-8").strip()
@@ -1152,8 +1160,11 @@ class CodeQLGitAuditWorkflow:
         seen: set[str] = set()
         qlpack = self.history_dir / "qlpack.yml"
         try:
-            qlpack_ready = qlpack.is_file() and "codeql/cpp-all" in qlpack.read_text(
-                encoding="utf-8"
+            qlpack_text = qlpack.read_text(encoding="utf-8")
+            qlpack_ready = (
+                qlpack.is_file()
+                and "codeql/cpp-all" in qlpack_text
+                and _declares_cpp_extractor(qlpack_text)
             )
         except (OSError, UnicodeError):
             qlpack_ready = False
@@ -1220,7 +1231,7 @@ class CodeQLGitAuditWorkflow:
                 codeql,
                 "test",
                 "run",
-                str(rule.test_path),
+                str(rule.test_path / "test.qlref"),
                 f"--search-path={self.history_dir}",
             ]
             if self.config.scan_threads is not None:
@@ -1234,6 +1245,7 @@ class CodeQLGitAuditWorkflow:
                 stderr=subprocess.STDOUT,
                 text=True,
                 check=False,
+                cwd=str(self.history_dir),
             )
             output = str(completed.stdout or "")
             test_log_path = self.logs_dir / (
@@ -1366,7 +1378,6 @@ class CodeQLGitAuditWorkflow:
                                         f"history:{rule.rule_id}: final rule differs from published ready rule"
                                     )
                                     reported_rule_changes.add(rule.rule_id)
-                                available_rules.setdefault(rule.rule_id, rule)
                             if ready_errors:
                                 totals["failures"].extend(
                                     f"ready-rule:{error}" for error in ready_errors
@@ -2078,6 +2089,13 @@ def _valid_codeql_database(path: Path) -> bool:
     return path.is_dir() and (
         (path / "codeql-database.yml").is_file() or (path / "db-cpp").is_dir()
     )
+
+
+def _declares_cpp_extractor(qlpack_text: str) -> bool:
+    return re.search(
+        r"(?m)^\s*extractor\s*:\s*['\"]?cpp['\"]?\s*(?:#.*)?$",
+        qlpack_text,
+    ) is not None
 
 
 def _goal_objective(prompt: str) -> str:

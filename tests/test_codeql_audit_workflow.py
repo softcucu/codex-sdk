@@ -464,7 +464,7 @@ def test_first_ready_rule_scans_before_history_goal_completes(tmp_path: Path) ->
             ready.mkdir(parents=True, exist_ok=True)
             (root / "qlpack.yml").write_text(
                 'name: local/git-history-audit\nversion: 0.0.1\n'
-                'dependencies:\n  codeql/cpp-all: "*"\n',
+                'extractor: cpp\ndependencies:\n  codeql/cpp-all: "*"\n',
                 encoding="utf-8",
             )
             (queries / "streaming.ql").write_text(
@@ -715,7 +715,7 @@ def test_rule_cannot_scan_when_positive_negative_codeql_test_fails(
         CodeQLAuditWorkflowConfig(
             project_dir=tmp_path,
             output_mode="quiet",
-            task_retries=0,
+            task_retries=2,
             task_retry_delay_seconds=0,
         ),
         _controller_factory=GoalOnlyController,
@@ -723,10 +723,163 @@ def test_rule_cannot_scan_when_positive_negative_codeql_test_fails(
         _subprocess_run=fake_subprocess,
     ).run()
 
-    assert result.status is CodeQLAuditStatus.FAILED
+    assert result.status is CodeQLAuditStatus.PARTIAL
     assert result.rules_total == 0
     assert not database_scan_started.is_set()
     assert any("CodeQL tests failed" in failure for failure in result.failed_tasks)
+    assert GoalOnlyController.calls == ["history"]
+
+
+def test_failed_rule_does_not_block_passing_rule_scan_and_review(
+    tmp_path: Path,
+) -> None:
+    class TwoRuleController(GoalOnlyController):
+        def _write_history(self, commit: str) -> None:
+            super()._write_history(commit)
+            root = self.cwd / "codeql-git-audit" / "history-analysis"
+            query_path = root / "queries" / "passing.ql"
+            query_path.write_text(
+                "/**\n * @kind problem\n * @id demo/passing-rule\n */\n"
+                "import cpp\nfrom Function f\n"
+                'where f.getName() = "good_to_scan"\nselect f\n',
+                encoding="utf-8",
+            )
+            pattern = {
+                "id": "demo/passing-rule",
+                "name": "Passing rule",
+                "description": "This rule must scan despite its failing sibling.",
+                "query_path": "queries/passing.ql",
+                "severity": "error",
+                "precision": "high",
+                "evidence_commits": [commit],
+                "evidence": [
+                    {
+                        "commit": commit,
+                        "path": "src/demo.c",
+                        "symbols": ["good_to_scan"],
+                        "reason": "The diff added the missing check.",
+                    }
+                ],
+                "tests": _write_query_test(
+                    root, f"{commit}-passing", "passing.ql"
+                ),
+            }
+            (root / "ready-rules" / f"{commit}-passing.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "status": "ready",
+                        "git_head": "abc123",
+                        "source_commit": commit,
+                        "pattern": pattern,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            report_path = root / "commits" / f"{commit}.json"
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            report["vulnerabilities"][0]["rules"].append(pattern)
+            report_path.write_text(json.dumps(report), encoding="utf-8")
+
+    TwoRuleController.reset()
+    tested_rules: list[str] = []
+    scanned_rules: list[str] = []
+
+    def fake_builder(repo: Path, output: Path, **_kwargs: Any) -> dict[str, Any]:
+        database = output / "databases" / "one"
+        (database / "db-cpp").mkdir(parents=True)
+        filelists = output / "filelists"
+        filelists.mkdir()
+        (filelists / "one.files.txt").write_text(
+            "src/demo.c\n", encoding="utf-8"
+        )
+        return {
+            "shards": [
+                {"shard_id": "one", "database": str(database), "status": "built"}
+            ]
+        }
+
+    def fake_subprocess(command, **kwargs):
+        if command[0] == "git":
+            return SimpleNamespace(returncode=0, stdout="abc123\n", stderr="")
+        if command[1:3] == ["test", "run"]:
+            qlref = Path(command[3])
+            assert qlref.name == "test.qlref"
+            assert kwargs["cwd"] == str(
+                tmp_path / "codeql-git-audit" / "history-analysis"
+            )
+            tested_rules.append(qlref.parent.name)
+            if qlref.parent.name.endswith("-demo"):
+                return SimpleNamespace(
+                    returncode=1,
+                    stdout="Cannot resolve QL reference",
+                    stderr="",
+                )
+            return SimpleNamespace(returncode=0, stdout="tests passed", stderr="")
+
+        query = Path(command[4])
+        scanned_rules.append(query.name)
+        output_argument = next(
+            item for item in command if item.startswith("--output=")
+        )
+        sarif = Path(output_argument.split("=", 1)[1])
+        sarif.write_text(
+            json.dumps(
+                {
+                    "runs": [
+                        {
+                            "results": [
+                                {
+                                    "ruleId": "demo/passing-rule",
+                                    "message": {
+                                        "text": "unchecked historical pattern"
+                                    },
+                                    "locations": [
+                                        {
+                                            "physicalLocation": {
+                                                "artifactLocation": {
+                                                    "uri": "src/demo.c"
+                                                },
+                                                "region": {
+                                                    "startLine": 7,
+                                                    "startColumn": 3,
+                                                },
+                                            }
+                                        }
+                                    ],
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    result = CodeQLGitAuditWorkflow(
+        CodeQLAuditWorkflowConfig(
+            project_dir=tmp_path,
+            output_mode="quiet",
+            task_retries=0,
+            task_retry_delay_seconds=0,
+            scan_workers=1,
+            review_workers=1,
+        ),
+        _controller_factory=TwoRuleController,
+        _database_builder=fake_builder,
+        _subprocess_run=fake_subprocess,
+    ).run()
+
+    assert result.status is CodeQLAuditStatus.PARTIAL
+    assert sorted(tested_rules) == ["abc123-demo", "abc123-passing"]
+    assert scanned_rules == ["passing.ql"]
+    assert result.rules_total == 1
+    assert result.suspicious_total == 1
+    assert result.reviewed_total == 1
+    assert result.confirmed_total == 1
+    assert TwoRuleController.calls == ["history", "review"]
+    assert any("Cannot resolve QL reference" in item for item in result.failed_tasks)
 
 
 def _prepare_history_validation(tmp_path: Path) -> tuple[CodeQLGitAuditWorkflow, Path]:
@@ -769,6 +922,17 @@ def test_missing_qlref_is_rebuilt_from_canonical_query_path(tmp_path: Path) -> N
 
     assert assessment.rules[0].rule_id == "demo/history-rule"
     assert qlref.read_text(encoding="utf-8") == "queries/demo.ql\n"
+
+
+def test_history_query_pack_declares_cpp_extractor(tmp_path: Path) -> None:
+    workflow = CodeQLGitAuditWorkflow(
+        CodeQLAuditWorkflowConfig(project_dir=tmp_path, output_mode="quiet")
+    )
+    workflow._prepare_directories()
+    workflow._install_history_qlpack()
+
+    qlpack = (workflow.history_dir / "qlpack.yml").read_text(encoding="utf-8")
+    assert "extractor: cpp\n" in qlpack
 
 
 def test_ready_marker_is_canonical_when_commit_rule_copy_drifts(
