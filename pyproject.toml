@@ -21,7 +21,7 @@ dev = [
 ]
 
 [project.scripts]
-codex-goal = "codex_controller.common.cli:main"
+codex-goal = "codex_controller.codex_sdk.cli:main"
 codex-vuln-audit = "codex_controller.workflows.vulnerability_audit.cli:main"
 codex-codeql-git-audit = "codex_controller.workflows.codeql_git_audit.cli:main"
 

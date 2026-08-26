@@ -10,7 +10,7 @@ from .workflow import (
     CodeQLAuditWorkflowError,
     CodeQLGitAuditWorkflow,
 )
-from ...common.config import OutputMode, ResumePolicy
+from ...codex_sdk.config import OutputMode, ResumePolicy
 
 
 def _positive_int(value: str) -> int:

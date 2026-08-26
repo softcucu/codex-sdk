@@ -1,4 +1,4 @@
-"""Shared Codex controller, models, rendering, and concurrency primitives."""
+"""Reusable Codex SDK controller, models, rendering, and concurrency primitives."""
 
 from openai_codex import ApprovalMode, CodexConfig, Sandbox
 

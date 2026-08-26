@@ -16,7 +16,7 @@ Codex 的 Python 控制封装，基于官方 `openai-codex` SDK 和本地 app-se
 
 ```text
 src/codex_controller/
-├── common/                         # Codex 控制器、配置、模型、渲染和线程池
+├── codex_sdk/                      # Codex 控制器、配置、模型、渲染和线程池
 └── workflows/
     ├── vulnerability_audit/        # 高风险模块发现与 DoS 审计
     │   └── prompts/

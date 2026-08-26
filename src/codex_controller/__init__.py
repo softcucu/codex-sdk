@@ -6,16 +6,16 @@ import sys as _sys
 
 from openai_codex import ApprovalMode, CodexConfig, Sandbox
 
-from .common.config import ControllerConfig, OutputMode, ResumePolicy, resolve_codex_bin
-from .common.controller import CodexController
-from .common.errors import (
+from .codex_sdk.config import ControllerConfig, OutputMode, ResumePolicy, resolve_codex_bin
+from .codex_sdk.controller import CodexController
+from .codex_sdk.errors import (
     CodexControllerError,
     GoalResumeExhaustedError,
     IncompatibleCodexSdkError,
     NoActiveGoalError,
 )
-from .common.models import GoalResult, GoalState, RunResult
-from .common.pool import CodexThreadPool, GoalTask, RunTask
+from .codex_sdk.models import GoalResult, GoalState, RunResult
+from .codex_sdk.pool import CodexThreadPool, GoalTask, RunTask
 from .workflows.codeql_git_audit.workflow import (
     CodeQLAuditAlreadyRunningError,
     CodeQLAuditOutputValidationError,
@@ -37,14 +37,14 @@ from .workflows.vulnerability_audit.workflow import (
 
 # Keep the pre-refactor module paths importable. These are module aliases rather
 # than duplicate shim files, so implementation code still has one canonical home.
-from .common import _backend as _backend
-from .common import cli as cli
-from .common import config as config
-from .common import controller as controller
-from .common import errors as errors
-from .common import models as models
-from .common import pool as pool
-from .common import render as render
+from .codex_sdk import _backend as _backend
+from .codex_sdk import cli as cli
+from .codex_sdk import config as config
+from .codex_sdk import controller as controller
+from .codex_sdk import errors as errors
+from .codex_sdk import models as models
+from .codex_sdk import pool as pool
+from .codex_sdk import render as render
 from .workflows.codeql_git_audit import cli as codeql_audit_cli
 from .workflows.codeql_git_audit import cmake_splitter as codeql_cmake_split_db_semantic_v4
 from .workflows.codeql_git_audit import database_builder as codeql_database_builder
