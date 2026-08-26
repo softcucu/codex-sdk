@@ -343,7 +343,7 @@ PYTHONPATH=src .venv/bin/python codeql_git_history_audit_workflow.py \
 codeql-git-audit/
 ├── database-stage/       # manifest、filelists 和分片 CodeQL 数据库
 ├── history-analysis/     # commits/、queries/、query-tests/、ready-rules/、patterns.json
-├── scans/                # 每个“数据库 × 规则”的 SARIF 与扫描完成元数据
+├── scans/                # 每个“数据库 × 规则”的 SARIF、CodeQL 日志与扫描状态元数据
 ├── findings/             # 送交模型确认的规范化疑似问题
 ├── reviews/              # 每条疑似问题的完整审计 JSON
 ├── confirmed/            # 已确认为真实问题的审计 JSON
@@ -352,6 +352,8 @@ codeql-git-audit/
 ```
 
 重复运行会在 Git HEAD 与分片参数未变化时复用合法数据库、规则、SARIF 和已校验 review；`--force` 会启动新一代任务并重跑。只有未提交改动发生变化而 HEAD 不变时，也应使用 `--force`。历史中没有足够证据生成可靠规则时，Goal 可以输出空规则集，此时工作流会正常完成而不会虚构规则。扫描或个别确认失败时状态为 `partial`、退出码为 `2`；前置建库或历史规则阶段失败时状态为 `failed`、退出码为 `1`。
+
+`ready-rules/*.json` 是已发布规则的唯一数据源；最终 commit 报告中的重复规则副本会按 ready marker 自动规范化。调度器也会根据 `query_path` 自动补齐或修正 `test.qlref`，随后并发运行规则测试。每条通过测试的规则会立即进入扫描，不等待其他 ready 规则；`scans/*.scan.json` 会依次记录 `running`、`completed` 或 `failed`，CodeQL 输出保存在同名 `.log` 中。
 
 Python API：
 

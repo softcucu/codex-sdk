@@ -187,6 +187,13 @@ class _Rule:
 
 
 @dataclass(frozen=True, slots=True)
+class _PublishedRule:
+    rule: _Rule
+    raw_pattern: dict[str, Any]
+    path: Path
+
+
+@dataclass(frozen=True, slots=True)
 class _CommitAssessment:
     commit: str
     verdict: str
@@ -463,6 +470,8 @@ class CodeQLGitAuditWorkflow:
             self.findings_dir,
             self.reviews_dir,
             self.confirmed_dir,
+            self.logs_dir,
+            self.goal_prompts_dir,
         ):
             directory.resolve().relative_to(self.output_dir.resolve())
             if directory.is_dir():
@@ -775,8 +784,7 @@ class CodeQLGitAuditWorkflow:
                 f"non-security verdict for {commit} cannot contain vulnerabilities"
             )
 
-        rules: list[_Rule] = []
-        raw_patterns: list[dict[str, Any]] = []
+        rule_ids: list[str] = []
         seen_rule_ids: set[str] = set()
         for index, vulnerability in enumerate(vulnerabilities):
             if not isinstance(vulnerability, dict):
@@ -799,34 +807,58 @@ class CodeQLGitAuditWorkflow:
                     f"{commit}.vulnerabilities[{index}] requires at least one CodeQL rule"
                 )
             for rule_index, raw_rule in enumerate(raw_rules):
-                rule = self._validate_rule(
-                    raw_rule,
-                    f"{commit}.vulnerabilities[{index}].rules[{rule_index}]",
-                )
-                self._ensure_rule_tests_pass(rule)
-                if commit not in rule.evidence_commits:
+                label = f"{commit}.vulnerabilities[{index}].rules[{rule_index}]"
+                if not isinstance(raw_rule, dict):
+                    raise CodeQLAuditOutputValidationError(f"{label} is not an object")
+                rule_id = str(raw_rule.get("id", ""))
+                if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,127}", rule_id):
                     raise CodeQLAuditOutputValidationError(
-                        f"rule {rule.rule_id} does not cite its source commit {commit}"
+                        f"invalid or missing rule id in {label}: {rule_id!r}"
                     )
-                if rule.rule_id in seen_rule_ids:
+                if rule_id in seen_rule_ids:
                     raise CodeQLAuditOutputValidationError(
-                        f"duplicate rule id in commit {commit}: {rule.rule_id}"
+                        f"duplicate rule id in commit {commit}: {rule_id}"
                     )
-                seen_rule_ids.add(rule.rule_id)
-                rules.append(rule)
-                raw_patterns.append(dict(raw_rule))
+                seen_rule_ids.add(rule_id)
+                rule_ids.append(rule_id)
 
         published = self._ready_rules_for_commit(commit, git_head)
-        published_by_id = {rule.rule_id: rule for rule in published}
+        published_by_id = {item.rule.rule_id: item for item in published}
         if set(published_by_id) != seen_rule_ids:
             raise CodeQLAuditOutputValidationError(
                 f"ready rules for {commit} do not exactly match its commit assessment"
             )
-        for rule in rules:
-            if _rule_signature(published_by_id[rule.rule_id]) != _rule_signature(rule):
+        rules: list[_Rule] = []
+        raw_patterns: list[dict[str, Any]] = []
+        canonical_patterns: dict[str, dict[str, Any]] = {}
+        for rule_id in rule_ids:
+            published_rule = published_by_id[rule_id]
+            rule = published_rule.rule
+            if commit not in rule.evidence_commits:
                 raise CodeQLAuditOutputValidationError(
-                    f"published ready rule differs from commit assessment: {rule.rule_id}"
+                    f"rule {rule.rule_id} does not cite its source commit {commit}"
                 )
+            self._ensure_rule_tests_pass(rule)
+            canonical = dict(published_rule.raw_pattern)
+            rules.append(rule)
+            raw_patterns.append(canonical)
+            canonical_patterns[rule_id] = canonical
+
+        # A ready marker is published only after its query and tests are complete,
+        # so it is the canonical representation of a rule.  The Goal also writes a
+        # copy into the commit report; normalize that copy here instead of failing
+        # the entire commit because independently rendered JSON drifted.
+        report_changed = False
+        for vulnerability in vulnerabilities:
+            normalized_rules: list[dict[str, Any]] = []
+            for raw_rule in vulnerability.get("rules", ()):
+                canonical = canonical_patterns[str(raw_rule["id"])]
+                normalized_rules.append(canonical)
+                if raw_rule != canonical:
+                    report_changed = True
+            vulnerability["rules"] = normalized_rules
+        if report_changed:
+            _atomic_json(report_path, data)
         return _CommitAssessment(
             commit=commit,
             verdict=verdict,
@@ -835,8 +867,10 @@ class CodeQLGitAuditWorkflow:
             path=report_path,
         )
 
-    def _ready_rules_for_commit(self, commit: str, git_head: str) -> list[_Rule]:
-        rules: list[_Rule] = []
+    def _ready_rules_for_commit(
+        self, commit: str, git_head: str
+    ) -> list[_PublishedRule]:
+        rules: list[_PublishedRule] = []
         seen: set[str] = set()
         for path in sorted(self.ready_rules_dir.glob("*.json")):
             try:
@@ -851,13 +885,20 @@ class CodeQLGitAuditWorkflow:
                 or data.get("source_commit") != commit
             ):
                 continue
-            rule = self._validate_rule(data.get("pattern"), f"ready rule {path.name}")
+            raw_pattern = data.get("pattern")
+            rule = self._validate_rule(raw_pattern, f"ready rule {path.name}")
             if rule.rule_id in seen:
                 raise CodeQLAuditOutputValidationError(
                     f"duplicate ready rule for {commit}: {rule.rule_id}"
                 )
             seen.add(rule.rule_id)
-            rules.append(rule)
+            rules.append(
+                _PublishedRule(
+                    rule=rule,
+                    raw_pattern=dict(raw_pattern),
+                    path=path,
+                )
+            )
         return rules
 
     def _git_fingerprint(self) -> str:
@@ -999,15 +1040,21 @@ class CodeQLGitAuditWorkflow:
             )
         qlref_path = test_path / "test.qlref"
         expected_path = test_path / "test.expected"
-        if not qlref_path.is_file() or not expected_path.is_file():
+        if not expected_path.is_file():
             raise CodeQLAuditOutputValidationError(
-                f"query tests for {rule_id} require test.qlref and test.expected"
+                f"query tests for {rule_id} require test.expected"
             )
-        qlref_text = qlref_path.read_text(encoding="utf-8").strip()
-        if query_path.name not in qlref_text:
-            raise CodeQLAuditOutputValidationError(
-                f"test.qlref for {rule_id} does not reference {query_path.name}"
-            )
+        expected_qlref = query_relative.as_posix()
+        with self._rule_test_lock:
+            try:
+                qlref_text = qlref_path.read_text(encoding="utf-8").strip()
+            except (OSError, UnicodeError):
+                qlref_text = ""
+            if qlref_text != expected_qlref:
+                _atomic_text(qlref_path, expected_qlref + "\n")
+                self._emit_status(
+                    f"[codeql-test] normalized test.qlref for {rule_id}"
+                )
         expected_text = expected_path.read_text(encoding="utf-8")
         if not all(case in expected_text for case in positive_cases):
             raise CodeQLAuditOutputValidationError(
@@ -1070,7 +1117,6 @@ class CodeQLGitAuditWorkflow:
                         "rule was published before a valid qlpack.yml"
                     )
                 rule = self._validate_rule(data.get("pattern"), f"ready rule {path.name}")
-                self._ensure_rule_tests_pass(rule)
                 if rule.rule_id in seen:
                     raise CodeQLAuditOutputValidationError(
                         f"duplicate ready rule id: {rule.rule_id}"
@@ -1086,6 +1132,9 @@ class CodeQLGitAuditWorkflow:
         while True:
             with self._rule_test_lock:
                 if signature in self._rule_test_results:
+                    cached_error = self._rule_test_results[signature]
+                    if cached_error is not None:
+                        raise CodeQLAuditOutputValidationError(cached_error)
                     return
                 event = self._rule_test_inflight.get(signature)
                 if event is None:
@@ -1111,6 +1160,7 @@ class CodeQLGitAuditWorkflow:
                 command.append(f"--threads={self.config.scan_threads}")
             if self.config.scan_ram_mb is not None:
                 command.append(f"--ram={self.config.scan_ram_mb}")
+            self._emit_status(f"[codeql-test] started {rule.rule_id}")
             completed = self._subprocess_run(
                 command,
                 stdout=subprocess.PIPE,
@@ -1118,13 +1168,24 @@ class CodeQLGitAuditWorkflow:
                 text=True,
                 check=False,
             )
+            output = str(completed.stdout or "")
+            test_log_path = self.logs_dir / (
+                f"codeql-test--{_safe_name(rule.rule_id)}--{signature[:10]}.log"
+            )
+            _atomic_text(test_log_path, output)
             if completed.returncode != 0:
-                output = str(completed.stdout or "")
-                raise CodeQLAuditOutputValidationError(
+                error = (
                     f"CodeQL tests failed for {rule.rule_id}: {output[-2000:]}"
                 )
+                with self._rule_test_lock:
+                    self._rule_test_results[signature] = error
+                self._emit_status(
+                    f"[codeql-test] failed {rule.rule_id}; log={test_log_path}"
+                )
+                raise CodeQLAuditOutputValidationError(error)
             with self._rule_test_lock:
                 self._rule_test_results[signature] = None
+            self._emit_status(f"[codeql-test] passed {rule.rule_id}")
         finally:
             with self._rule_test_lock:
                 finished = self._rule_test_inflight.pop(signature, None)
@@ -1157,6 +1218,7 @@ class CodeQLGitAuditWorkflow:
         known_files = self._known_repository_files()
         available_rules: dict[str, _Rule] = {}
         ready_signatures: dict[str, str] = {}
+        rule_test_errors: dict[str, str] = {}
         scheduled: set[tuple[str, str]] = set()
         seen_findings: set[str] = set()
         per_rule: dict[str, int] = {}
@@ -1164,6 +1226,7 @@ class CodeQLGitAuditWorkflow:
             Future[list[_Finding]], tuple[dict[str, Any], _Rule]
         ] = {}
         review_futures: dict[Future[_Review], _Finding] = {}
+        rule_test_futures: dict[Future[None], _Rule] = {}
         history_resolved = False
         reported_rule_changes: set[str] = set()
 
@@ -1173,7 +1236,10 @@ class CodeQLGitAuditWorkflow:
         ) as review_executor, ThreadPoolExecutor(
             max_workers=self.config.scan_workers,
             thread_name_prefix="codeql-scan",
-        ) as scan_executor:
+        ) as scan_executor, ThreadPoolExecutor(
+            max_workers=self.config.scan_workers,
+            thread_name_prefix="codeql-rule-test",
+        ) as rule_test_executor:
             try:
                 while True:
                     ready_rules, ready_errors = self._discover_ready_rules(
@@ -1185,7 +1251,10 @@ class CodeQLGitAuditWorkflow:
                         previous = ready_signatures.get(rule.rule_id)
                         if previous is None:
                             ready_signatures[rule.rule_id] = signature
-                            available_rules[rule.rule_id] = rule
+                            future = rule_test_executor.submit(
+                                self._ensure_rule_tests_pass, rule
+                            )
+                            rule_test_futures[future] = rule
                         elif (
                             previous != signature
                             and rule.rule_id not in reported_rule_changes
@@ -1235,6 +1304,18 @@ class CodeQLGitAuditWorkflow:
                                 totals["failures"].extend(
                                     f"ready-rule:{error}" for error in ready_errors
                                 )
+
+                    for future in [
+                        item for item in rule_test_futures if item.done()
+                    ]:
+                        rule = rule_test_futures.pop(future)
+                        try:
+                            future.result()
+                        except Exception as exc:
+                            rule_test_errors[rule.rule_id] = _exception_text(exc)
+                        else:
+                            rule_test_errors.pop(rule.rule_id, None)
+                            available_rules[rule.rule_id] = rule
 
                     for rule in list(available_rules.values()):
                         query_hash = _hash_files([rule.query_path])
@@ -1305,11 +1386,18 @@ class CodeQLGitAuditWorkflow:
                         totals["reviewed"] += 1
                         totals[review.verdict] += 1
 
-                    if history_resolved and not scan_futures and not review_futures:
+                    if (
+                        history_resolved
+                        and not rule_test_futures
+                        and not scan_futures
+                        and not review_futures
+                    ):
                         break
 
-                    pending: set[Future[Any]] = set(scan_futures) | set(
-                        review_futures
+                    pending: set[Future[Any]] = (
+                        set(rule_test_futures)
+                        | set(scan_futures)
+                        | set(review_futures)
                     )
                     if not history_resolved:
                         pending.add(history_future)
@@ -1318,6 +1406,8 @@ class CodeQLGitAuditWorkflow:
                     else:
                         self._sleep(0.2)
             except KeyboardInterrupt:
+                for future in rule_test_futures:
+                    future.cancel()
                 for future in scan_futures:
                     future.cancel()
                 for future in review_futures:
@@ -1326,6 +1416,10 @@ class CodeQLGitAuditWorkflow:
 
         totals["rules"] = sorted(
             available_rules.values(), key=lambda rule: rule.rule_id
+        )
+        totals["failures"].extend(
+            f"ready-rule:{rule_id}: {error}"
+            for rule_id, error in sorted(rule_test_errors.items())
         )
         return totals
 
@@ -1359,7 +1453,10 @@ class CodeQLGitAuditWorkflow:
         if not force and sarif_path.is_file() and metadata_path.is_file():
             try:
                 metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-                if metadata.get("scan_key") == scan_key:
+                if (
+                    metadata.get("scan_key") == scan_key
+                    and metadata.get("status", "completed") == "completed"
+                ):
                     return self._parse_sarif(sarif_path, shard_id, known_files)
             except (OSError, UnicodeError, json.JSONDecodeError):
                 pass
@@ -1379,27 +1476,68 @@ class CodeQLGitAuditWorkflow:
             command.append(f"--threads={self.config.scan_threads}")
         if self.config.scan_ram_mb is not None:
             command.append(f"--ram={self.config.scan_ram_mb}")
-        completed = self._subprocess_run(
-            command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            check=False,
-        )
-        if completed.returncode != 0:
-            raise CodeQLAuditWorkflowError(
-                f"CodeQL returned {completed.returncode}: {completed.stdout[-2000:]}"
-            )
-        findings = self._parse_sarif(sarif_path, shard_id, known_files)
         _atomic_json(
             metadata_path,
             {
                 "scan_key": scan_key,
+                "status": "running",
+                "shard_id": shard_id,
+                "rule_id": rule.rule_id,
+                "started_at": _utc_now(),
+            },
+        )
+        self._emit_status(
+            f"[codeql-scan] started shard={shard_id} rule={rule.rule_id}"
+        )
+        scan_log_path = self.scans_dir / f"{scan_name}.log"
+        try:
+            completed = self._subprocess_run(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                check=False,
+            )
+            output = str(completed.stdout or "")
+            _atomic_text(scan_log_path, output)
+            if completed.returncode != 0:
+                raise CodeQLAuditWorkflowError(
+                    f"CodeQL returned {completed.returncode}: {output[-2000:]}"
+                )
+            findings = self._parse_sarif(sarif_path, shard_id, known_files)
+        except Exception as exc:
+            _atomic_json(
+                metadata_path,
+                {
+                    "scan_key": scan_key,
+                    "status": "failed",
+                    "shard_id": shard_id,
+                    "rule_id": rule.rule_id,
+                    "failed_at": _utc_now(),
+                    "error": _exception_text(exc),
+                    "log_path": self._project_path(scan_log_path),
+                },
+            )
+            self._emit_status(
+                f"[codeql-scan] failed shard={shard_id} rule={rule.rule_id}; "
+                f"log={scan_log_path}"
+            )
+            raise
+        _atomic_json(
+            metadata_path,
+            {
+                "scan_key": scan_key,
+                "status": "completed",
                 "shard_id": shard_id,
                 "rule_id": rule.rule_id,
                 "finding_count": len(findings),
                 "completed_at": _utc_now(),
+                "log_path": self._project_path(scan_log_path),
             },
+        )
+        self._emit_status(
+            f"[codeql-scan] completed shard={shard_id} rule={rule.rule_id} "
+            f"findings={len(findings)}"
         )
         return findings
 
@@ -1613,7 +1751,7 @@ class CodeQLGitAuditWorkflow:
             execution_error: str | None = None
             controller: CodexController | None = None
             log_path = self.logs_dir / f"{_safe_name(task_id)}.attempt-{retry + 1}.log"
-            log_handle = log_path.open("a+", encoding="utf-8")
+            log_handle = log_path.open("w+", encoding="utf-8")
             try:
                 controller = self._controller_factory(
                     cwd=str(self.project_dir),
@@ -1820,6 +1958,13 @@ class CodeQLGitAuditWorkflow:
             self._output.write(rendered)
             if not rendered.endswith("\n"):
                 self._output.write("\n")
+            self._output.flush()
+
+    def _emit_status(self, message: str) -> None:
+        if self.config.output_mode is OutputMode.QUIET:
+            return
+        with self._output_lock:
+            self._output.write(message.rstrip() + "\n")
             self._output.flush()
 
     def _read_prompt(self, name: str, override: str | Path | None) -> str:

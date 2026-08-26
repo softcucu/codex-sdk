@@ -236,6 +236,10 @@ def test_four_stage_pipeline_uses_parallel_prerequisites_and_goal_reviews(
             )
         output_argument = next(item for item in command if item.startswith("--output="))
         sarif = Path(output_argument.split("=", 1)[1])
+        scan_metadata = json.loads(
+            sarif.with_suffix(".scan.json").read_text(encoding="utf-8")
+        )
+        assert scan_metadata["status"] == "running"
         results = [] if is_slow_database else [
             {
                 "ruleId": "demo/history-rule",
@@ -296,6 +300,12 @@ def test_four_stage_pipeline_uses_parallel_prerequisites_and_goal_reviews(
         )
     )
     assert finding["path"] == "src/demo.c"
+    completed_scans = [
+        json.loads(path.read_text(encoding="utf-8"))
+        for path in (tmp_path / "codeql-git-audit" / "scans").glob("*.scan.json")
+    ]
+    assert completed_scans
+    assert all(item["status"] == "completed" for item in completed_scans)
 
 
 def test_empty_history_patterns_complete_without_codeql_scan(tmp_path: Path) -> None:
@@ -631,3 +641,66 @@ def test_rule_cannot_scan_when_positive_negative_codeql_test_fails(
     assert result.rules_total == 0
     assert not database_scan_started.is_set()
     assert any("CodeQL tests failed" in failure for failure in result.failed_tasks)
+
+
+def _prepare_history_validation(tmp_path: Path) -> tuple[CodeQLGitAuditWorkflow, Path]:
+    workflow = CodeQLGitAuditWorkflow(
+        CodeQLAuditWorkflowConfig(
+            project_dir=tmp_path,
+            codeql="/bin/true",
+            output_mode="quiet",
+            task_retry_delay_seconds=0,
+        )
+    )
+    workflow._prepare_directories()
+    workflow._install_history_qlpack()
+    GoalOnlyController(cwd=str(tmp_path))._write_history("abc123")
+    report_path = (
+        tmp_path
+        / "codeql-git-audit"
+        / "history-analysis"
+        / "commits"
+        / "abc123.json"
+    )
+    return workflow, report_path
+
+
+def test_missing_qlref_is_rebuilt_from_canonical_query_path(tmp_path: Path) -> None:
+    workflow, report_path = _prepare_history_validation(tmp_path)
+    qlref = (
+        tmp_path
+        / "codeql-git-audit"
+        / "history-analysis"
+        / "query-tests"
+        / "abc123-demo"
+        / "test.qlref"
+    )
+    qlref.unlink()
+
+    assessment = workflow._validate_commit_assessment(
+        "abc123", "abc123", report_path
+    )
+
+    assert assessment.rules[0].rule_id == "demo/history-rule"
+    assert qlref.read_text(encoding="utf-8") == "queries/demo.ql\n"
+
+
+def test_ready_marker_is_canonical_when_commit_rule_copy_drifts(
+    tmp_path: Path,
+) -> None:
+    workflow, report_path = _prepare_history_validation(tmp_path)
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    report_rule = report["vulnerabilities"][0]["rules"][0]
+    report_rule["name"] = "Drifted report-only name"
+    report_rule["description"] = "This stale copy must not block scanning."
+    report_path.write_text(json.dumps(report), encoding="utf-8")
+
+    assessment = workflow._validate_commit_assessment(
+        "abc123", "abc123", report_path
+    )
+
+    assert assessment.rules[0].name == "Demo rule"
+    normalized = json.loads(report_path.read_text(encoding="utf-8"))
+    normalized_rule = normalized["vulnerabilities"][0]["rules"][0]
+    assert normalized_rule["name"] == "Demo rule"
+    assert normalized_rule["description"] == "Historical missing check"
