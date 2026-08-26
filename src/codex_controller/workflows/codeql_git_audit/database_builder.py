@@ -211,6 +211,7 @@ def build_repository_codeql_databases(
 def _load_cmake_v4() -> Any:
     errors: list[str] = []
     for name in (
+        "codex_controller.workflows.codeql_git_audit.cmake_splitter",
         "codeql_cmake_split_db_semantic_v4",
         "codex_controller.codeql_cmake_split_db_semantic_v4",
     ):
@@ -218,9 +219,7 @@ def _load_cmake_v4() -> Any:
             return importlib.import_module(name)
         except ImportError as exc:
             errors.append(str(exc))
-    source_checkout = (
-        Path(__file__).resolve().parents[2] / "codeql_cmake_split_db_semantic_v4.py"
-    )
+    source_checkout = Path(__file__).resolve().with_name("cmake_splitter.py")
     if source_checkout.is_file():
         spec = importlib.util.spec_from_file_location(
             "_codex_controller_cmake_split_v4", source_checkout

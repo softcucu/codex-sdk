@@ -575,6 +575,9 @@ def test_program_dispatches_one_goal_per_git_commit(tmp_path: Path) -> None:
     prompt = (
         Path(__file__).parents[1]
         / "src"
+        / "codex_controller"
+        / "workflows"
+        / "codeql_git_audit"
         / "prompts"
         / "git_history_codeql_rules_goal.txt"
     ).read_text(encoding="utf-8")

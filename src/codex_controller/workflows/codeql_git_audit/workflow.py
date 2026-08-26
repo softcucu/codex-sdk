@@ -26,9 +26,9 @@ from urllib.parse import unquote, urlparse
 
 from openai_codex import ApprovalMode, Sandbox
 
-from .codeql_database_builder import build_repository_codeql_databases
-from .config import OutputMode, ResumePolicy
-from .controller import CodexController
+from .database_builder import build_repository_codeql_databases
+from ...common.config import OutputMode, ResumePolicy
+from ...common.controller import CodexController
 
 
 _STATE_SCHEMA_VERSION = 1

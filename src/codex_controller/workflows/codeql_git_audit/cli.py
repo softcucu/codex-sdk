@@ -5,12 +5,12 @@ import sys
 from pathlib import Path
 from typing import Sequence
 
-from .codeql_audit_workflow import (
+from .workflow import (
     CodeQLAuditWorkflowConfig,
     CodeQLAuditWorkflowError,
     CodeQLGitAuditWorkflow,
 )
-from .config import OutputMode, ResumePolicy
+from ...common.config import OutputMode, ResumePolicy
 
 
 def _positive_int(value: str) -> int:

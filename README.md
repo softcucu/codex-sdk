@@ -10,6 +10,24 @@ Codex 的 Python 控制封装，基于官方 `openai-codex` SDK 和本地 app-se
 
 项目要求 Python 3.10 或更高版本。官方资料：[Codex Python SDK](https://learn.chatgpt.com/docs/codex-sdk#python-library)、[Using Goals in Codex](https://developers.openai.com/cookbook/examples/codex/using_goals_in_codex)、[app-server API](https://learn.chatgpt.com/docs/app-server#api-overview)。
 
+## 代码结构
+
+公共 Codex 控制代码与工作流实现彼此隔离，工作流专用的提示词和工具跟随各自模块存放：
+
+```text
+src/codex_controller/
+├── common/                         # Codex 控制器、配置、模型、渲染和线程池
+└── workflows/
+    ├── vulnerability_audit/        # 高风险模块发现与 DoS 审计
+    │   └── prompts/
+    └── codeql_git_audit/           # Git 历史驱动的 CodeQL 审计
+        ├── prompts/
+        ├── database_builder.py
+        └── cmake_splitter.py
+```
+
+公共 API 继续从 `codex_controller` 导入。工作流也保留原有顶层导出；需要直接引用工作流模块时，推荐使用 `codex_controller.workflows.vulnerability_audit` 和 `codex_controller.workflows.codeql_git_audit`。
+
 ## 安装
 
 ```bash
@@ -290,7 +308,10 @@ NetworkHandler-DoS-001.md
 Python API：
 
 ```python
-from codex_controller import AuditWorkflowConfig, VulnerabilityAuditWorkflow
+from codex_controller.workflows.vulnerability_audit import (
+    AuditWorkflowConfig,
+    VulnerabilityAuditWorkflow,
+)
 
 
 config = AuditWorkflowConfig(
@@ -312,7 +333,7 @@ print(result.status, result.results_dir)
 3. CodeQL 数据库阶段完成后，只要任一 commit Goal 发布第一条 ready rule 且程序二次运行正反例测试通过，就立即开始扫描，不等待其他 commit Goal 或其他规则完成；后续合格规则自动追加“数据库 × 规则”扫描；
 4. 任一扫描的 SARIF 一产生，就立即将其中去重后的疑似问题交给独立 Codex Goal 做源码路径确认，不等待其他扫描结束。
 
-CMake 仓库沿用 `codeql_cmake_split_db_semantic_v4.py` 的 target、依赖和 include 闭包分片。没有 CMake 时，工作流识别 Make、Meson、Bazel、Autotools、SCons、qmake 等构建描述文件所在目录，再结合源码目录归属与仓库内 `#include` 闭包生成分片。当前数据库分片器面向 CodeQL 的 `c-cpp` language。
+CMake 仓库沿用工作流目录内 `cmake_splitter.py` 的 target、依赖和 include 闭包分片。没有 CMake 时，工作流识别 Make、Meson、Bazel、Autotools、SCons、qmake 等构建描述文件所在目录，再结合源码目录归属与仓库内 `#include` 闭包生成分片。当前数据库分片器面向 CodeQL 的 `c-cpp` language。
 
 所有大模型任务均通过 `CodexController.goal()` 执行：每条 Git commit 对应一个独立可恢复 Goal，每条去重后的疑似问题也对应一个独立可恢复 Goal。程序预先创建共享 `qlpack.yml`，commit Goal 只写自己唯一命名的报告、查询、query tests 和 ready marker，因此可以安全并发。提示词文件以 `/goal` 开头，调度器在调用 `CodexController.goal()` 前剥离命令前缀，避免把 CLI 命令文本嵌入 objective。渲染后的完整说明超过 Goal 的 4000 字符限制时，程序会把它保存到 `.workflow/goal-prompts/`，并提交一个包含说明文件路径及内容哈希的短 objective。CodeQL 建库和扫描本身不调用大模型。
 
@@ -358,7 +379,10 @@ codeql-git-audit/
 Python API：
 
 ```python
-from codex_controller import CodeQLAuditWorkflowConfig, CodeQLGitAuditWorkflow
+from codex_controller.workflows.codeql_git_audit import (
+    CodeQLAuditWorkflowConfig,
+    CodeQLGitAuditWorkflow,
+)
 
 
 result = CodeQLGitAuditWorkflow(
