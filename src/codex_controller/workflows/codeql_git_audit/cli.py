@@ -125,6 +125,15 @@ def build_parser() -> argparse.ArgumentParser:
         default=OutputMode.HUMAN.value,
     )
     parser.add_argument("--force", action="store_true", help="rerun every stage")
+    parser.add_argument(
+        "--skip-database-build",
+        action="store_true",
+        help=(
+            "reuse every database in database-stage/manifest.json without "
+            "checking HEAD or split parameters; fail instead of building if any "
+            "database is missing or invalid"
+        ),
+    )
     return parser
 
 
@@ -167,7 +176,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             ),
             output_mode=args.output_mode,
         )
-        result = CodeQLGitAuditWorkflow(config).run(force=args.force)
+        result = CodeQLGitAuditWorkflow(config).run(
+            force=args.force,
+            skip_database_build=args.skip_database_build,
+        )
     except KeyboardInterrupt:
         print("Interrupted; generated artifacts and Goal state were kept.", file=sys.stderr)
         return 130

@@ -351,6 +351,27 @@ codex-codeql-git-audit \
   --review-workers 4
 ```
 
+已有 `codeql-git-audit/database-stage/manifest.json` 和其中列出的全部数据库时，
+可以完全跳过建库阶段：
+
+```bash
+codex-codeql-git-audit \
+  -C /path/to/target-repository \
+  --skip-database-build
+```
+
+若要强制重跑规则生成、扫描和确认，同时保留现有数据库：
+
+```bash
+codex-codeql-git-audit \
+  -C /path/to/target-repository \
+  --force \
+  --skip-database-build
+```
+
+`--skip-database-build` 不比较 Git HEAD 或分片参数，但会逐一校验 manifest
+中的数据库；任一数据库缺失或无效时直接失败，不会退回到自动建库。
+
 也可从源码树直接启动：
 
 ```bash

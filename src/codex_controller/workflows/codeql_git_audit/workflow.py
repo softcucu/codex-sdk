@@ -323,11 +323,15 @@ class CodeQLGitAuditWorkflow:
         self._state: dict[str, Any] = {}
         self._output = config.output or sys.stdout
 
-    def run(self, *, force: bool = False) -> CodeQLAuditWorkflowResult:
+    def run(
+        self, *, force: bool = False, skip_database_build: bool = False
+    ) -> CodeQLAuditWorkflowResult:
         self._prepare_directories()
         with _WorkflowFileLock(self.lock_path):
             if force:
-                self._clear_force_artifacts()
+                self._clear_force_artifacts(
+                    preserve_databases=skip_database_build
+                )
                 self._prepare_directories()
             self._load_state(force=force)
             stage_errors: list[str] = []
@@ -337,7 +341,9 @@ class CodeQLGitAuditWorkflow:
             completed_history: _HistoryStageResult | None = None
 
             with ThreadPoolExecutor(max_workers=2, thread_name_prefix="codeql-prerequisite") as executor:
-                database_future = executor.submit(self._database_stage, force)
+                database_future = executor.submit(
+                    self._database_stage, force, skip_database_build
+                )
                 history_future = executor.submit(self._history_stage, force)
                 try:
                     manifest = database_future.result()
@@ -462,9 +468,8 @@ class CodeQLGitAuditWorkflow:
         ):
             directory.mkdir(parents=True, exist_ok=True)
 
-    def _clear_force_artifacts(self) -> None:
-        for directory in (
-            self.database_dir,
+    def _clear_force_artifacts(self, *, preserve_databases: bool = False) -> None:
+        directories = [
             self.history_dir,
             self.scans_dir,
             self.findings_dir,
@@ -472,7 +477,10 @@ class CodeQLGitAuditWorkflow:
             self.confirmed_dir,
             self.logs_dir,
             self.goal_prompts_dir,
-        ):
+        ]
+        if not preserve_databases:
+            directories.insert(0, self.database_dir)
+        for directory in directories:
             directory.resolve().relative_to(self.output_dir.resolve())
             if directory.is_dir():
                 shutil.rmtree(directory)
@@ -515,8 +523,18 @@ class CodeQLGitAuditWorkflow:
             self._state["workflow_status"] = status.value
             self._save_state_locked()
 
-    def _database_stage(self, force: bool) -> dict[str, Any]:
+    def _database_stage(
+        self, force: bool, skip_database_build: bool = False
+    ) -> dict[str, Any]:
         manifest_path = self.database_dir / "manifest.json"
+        if skip_database_build:
+            manifest = self._load_existing_database_manifest(manifest_path)
+            self._emit_status(
+                "[codeql-db] skipped database build; validated "
+                f"{len(manifest['shards'])} existing shard(s)"
+            )
+            return manifest
+
         database_input = {
             "git_head": self._git_fingerprint(),
             "target_loc": self.config.target_loc,
@@ -578,6 +596,55 @@ class CodeQLGitAuditWorkflow:
                 "completed_at": _utc_now(),
             },
         )
+        return manifest
+
+    def _load_existing_database_manifest(self, manifest_path: Path) -> dict[str, Any]:
+        if not manifest_path.is_file():
+            raise CodeQLAuditWorkflowError(
+                "--skip-database-build requires an existing database manifest: "
+                f"{manifest_path}"
+            )
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise CodeQLAuditWorkflowError(
+                f"cannot read existing database manifest: {exc}"
+            ) from exc
+        if not isinstance(manifest, dict) or not isinstance(
+            manifest.get("shards"), list
+        ):
+            raise CodeQLAuditWorkflowError(
+                f"invalid existing database manifest: {manifest_path}"
+            )
+        shards = manifest["shards"]
+        if not shards:
+            raise CodeQLAuditWorkflowError(
+                f"existing database manifest has no shards: {manifest_path}"
+            )
+
+        invalid: list[str] = []
+        for index, entry in enumerate(shards, 1):
+            if not isinstance(entry, dict):
+                invalid.append(f"shard #{index}: invalid manifest entry")
+                continue
+            raw_database = str(entry.get("database", ""))
+            database = Path(raw_database).expanduser()
+            if not database.is_absolute():
+                database = (self.database_dir / database).resolve()
+            if not _valid_codeql_database(database):
+                shard_id = str(entry.get("shard_id", f"#{index}"))
+                invalid.append(f"{shard_id}: {database}")
+                continue
+            entry["database"] = str(database)
+            entry["status"] = "skipped-existing"
+        if invalid:
+            details = "; ".join(invalid[:5])
+            if len(invalid) > 5:
+                details += f"; and {len(invalid) - 5} more"
+            raise CodeQLAuditWorkflowError(
+                "--skip-database-build found missing or invalid CodeQL "
+                f"database(s): {details}"
+            )
         return manifest
 
     def _completed_database_entries(self, manifest: Any) -> list[dict[str, Any]]:

@@ -9,6 +9,7 @@ from typing import Any
 
 from codex_controller import (
     CodeQLAuditStatus,
+    CodeQLAuditWorkflowError,
     CodeQLAuditWorkflowConfig,
     CodeQLGitAuditWorkflow,
 )
@@ -181,6 +182,88 @@ class GoalOnlyController:
             ),
             encoding="utf-8",
         )
+
+
+def test_skip_database_build_uses_manifest_without_invoking_builder(
+    tmp_path: Path,
+) -> None:
+    def unexpected_builder(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("database builder must not be invoked")
+
+    workflow = CodeQLGitAuditWorkflow(
+        CodeQLAuditWorkflowConfig(project_dir=tmp_path, output_mode="quiet"),
+        _database_builder=unexpected_builder,
+    )
+    workflow._prepare_directories()
+    database = workflow.database_dir / "databases" / "existing"
+    (database / "db-cpp").mkdir(parents=True)
+    (workflow.database_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "shards": [
+                    {
+                        "shard_id": "existing",
+                        "database": str(database),
+                        "status": "planned",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    manifest = workflow._database_stage(force=True, skip_database_build=True)
+
+    assert manifest["shards"][0]["status"] == "skipped-existing"
+    assert workflow._completed_database_entries(manifest) == manifest["shards"]
+
+
+def test_skip_database_build_rejects_missing_database(tmp_path: Path) -> None:
+    workflow = CodeQLGitAuditWorkflow(
+        CodeQLAuditWorkflowConfig(project_dir=tmp_path, output_mode="quiet")
+    )
+    workflow._prepare_directories()
+    workflow.database_dir.mkdir(parents=True)
+    (workflow.database_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "shards": [
+                    {
+                        "shard_id": "missing",
+                        "database": str(
+                            workflow.database_dir / "databases" / "missing"
+                        ),
+                        "status": "built",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    try:
+        workflow._database_stage(force=False, skip_database_build=True)
+    except CodeQLAuditWorkflowError as exc:
+        assert "missing or invalid CodeQL database" in str(exc)
+    else:
+        raise AssertionError("missing database should fail instead of being built")
+
+
+def test_force_can_preserve_database_artifacts(tmp_path: Path) -> None:
+    workflow = CodeQLGitAuditWorkflow(
+        CodeQLAuditWorkflowConfig(project_dir=tmp_path, output_mode="quiet")
+    )
+    workflow._prepare_directories()
+    database_marker = workflow.database_dir / "keep.txt"
+    history_marker = workflow.history_dir / "remove.txt"
+    workflow.database_dir.mkdir(parents=True)
+    database_marker.write_text("keep", encoding="utf-8")
+    history_marker.write_text("remove", encoding="utf-8")
+
+    workflow._clear_force_artifacts(preserve_databases=True)
+
+    assert database_marker.is_file()
+    assert not history_marker.exists()
 
 
 def test_four_stage_pipeline_uses_parallel_prerequisites_and_goal_reviews(

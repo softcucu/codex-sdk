@@ -11,8 +11,9 @@ def test_codeql_audit_cli_wires_concurrency_options(monkeypatch, tmp_path) -> No
         def __init__(self, config):
             captured["config"] = config
 
-        def run(self, *, force=False):
+        def run(self, *, force=False, skip_database_build=False):
             captured["force"] = force
+            captured["skip_database_build"] = skip_database_build
             return CodeQLAuditWorkflowResult(
                 status=CodeQLAuditStatus.PARTIAL,
                 output_dir=tmp_path / "codeql-git-audit",
@@ -31,6 +32,7 @@ def test_codeql_audit_cli_wires_concurrency_options(monkeypatch, tmp_path) -> No
             "--review-workers",
             "7",
             "--force",
+            "--skip-database-build",
         ]
     )
 
@@ -39,3 +41,4 @@ def test_codeql_audit_cli_wires_concurrency_options(monkeypatch, tmp_path) -> No
     assert captured["config"].history_workers == 5
     assert captured["config"].review_workers == 7
     assert captured["force"] is True
+    assert captured["skip_database_build"] is True
